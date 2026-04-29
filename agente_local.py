@@ -619,7 +619,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "4.7"
+CURRENT_VERSION = "4.8"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 def _baixar_e_aplicar_update(nova, url_nova):
@@ -1859,6 +1859,18 @@ if __name__ == "__main__":
             sys.exit(0)
 
     log.info(f"=== Concentrador de Impressoes e Dispositivos v{CURRENT_VERSION} iniciando ===")
+
+    # Remove exes versionados antigos (AgenteLocal_X.Y.exe) deixando apenas AgenteLocal.exe
+    if getattr(sys, 'frozen', False):
+        try:
+            for f in BASE_DIR.glob("AgenteLocal_*.exe"):
+                try:
+                    f.unlink()
+                    log.info(f"[CLEANUP] Removido exe antigo: {f.name}")
+                except Exception as e:
+                    log.warning(f"[CLEANUP] Nao foi possivel remover {f.name}: {e}")
+        except Exception as e:
+            log.warning(f"[CLEANUP] {e}")
 
     # Garante startup no Windows
     _garantir_startup()

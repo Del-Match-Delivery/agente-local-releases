@@ -1,5 +1,5 @@
 {
-  "version": "4.7",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v4.7/AgenteLocal.exe",
-  "notes": "Fix multiplas instancias: startup sempre corrige registro e atalho .lnk para AgenteLocal.exe"
+  "version": "4.8",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v4.8/AgenteLocal.exe",
+  "notes": "Limpeza automatica de exes versionados antigos no boot"
 }
