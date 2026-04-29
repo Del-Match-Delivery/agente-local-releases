@@ -611,7 +611,6 @@ def poll():
         for job in novos:
             jid = job["id"]
             _jobs_em_proc.add(jid)
-            ef_update_job(jid, "sent")
             def _run(j=job):
                 try: proc_job(j)
                 finally: _jobs_em_proc.discard(j["id"])
@@ -619,7 +618,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "4.9"
+CURRENT_VERSION = "5.0"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 def _baixar_e_aplicar_update(nova, url_nova):
