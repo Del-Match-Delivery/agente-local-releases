@@ -1,5 +1,5 @@
 {
-  "version": "3.8",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v3.8/AgenteLocal.exe",
-  "notes": "Correcao de polling, multi-rede, auto-update robusto, instalador hibrido"
+  "version": "3.9",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v3.9/AgenteLocal.exe",
+  "notes": "Fix impressoras: busca case-insensitive, normaliza espacos, correcao de areas"
 }

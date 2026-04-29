@@ -210,7 +210,7 @@ def _post(url, data, token, timeout=30, retries=2):
 def ef_poll_jobs():
     # Coleta areas unicas configuradas nas impressoras
     imps = cfg.get("impressoras", [])
-    areas = list(set([i.get("area","") for i in imps if i.get("area") and i.get("nome_impressora")]))
+    areas = list(set([i.get("area","").strip() for i in imps if i.get("area","").strip() and i.get("nome_impressora")]))
     payload = {"action": "poll"}
     if areas:
         payload["areas"] = areas
@@ -249,14 +249,15 @@ def sincronizar_impressoras():
         printers = resp.get("config",{}).get("printers", resp.get("printers", []))
         if not printers: return
         iw = listar_impressoras_windows()
-        imps_atuais = {i.get("nome"):i for i in cfg.get("impressoras",[])}
+        # Index case-insensitive e sem espaços extras para preservar config manual
+        imps_atuais = {i.get("nome","").strip().lower(): i for i in cfg.get("impressoras",[])}
         imps_novos = []
         for p in printers:
             ns = p.get("name",""); ts = p.get("printer_type","receipt")
             area = {"receipt":"caixa","kitchen":"cozinha","bar":"bar"}.get(ts,"caixa")
-            
-            # Preserva mapeamento manual já feito pelo usuário
-            existente = imps_atuais.get(ns)
+
+            # Preserva mapeamento manual já feito pelo usuário (busca case-insensitive)
+            existente = imps_atuais.get(ns.strip().lower())
             if existente and existente.get("nome_impressora"):
                 imps_novos.append(existente)
             else:
@@ -511,7 +512,7 @@ def _res_imp(pt):
     imps=cfg.get("impressoras",[])
     areas={"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"]}.get(pt,["caixa"])
     for i in imps:
-        if i.get("area") in areas or i.get("printer_type")==pt:
+        if i.get("area","").strip() in areas or i.get("printer_type")==pt:
             n=i.get("nome_impressora","")
             if n: return n
     if imps: return imps[0].get("nome_impressora","")
@@ -525,7 +526,22 @@ def proc_job(job):
     oid=content.get("order_id")
     if oid and len(content)<=3:
         p=ef_get_order(oid)
-        if p: content=p; log.info("[ORDER] OK")
+        if p:
+            content=p
+            # Normaliza: banco retorna order_items, _fmt espera items
+            if "order_items" in content and "items" not in content:
+                raw_items = content.get("order_items") or []
+                content["items"] = [
+                    {
+                        "name": it.get("name_snapshot") or it.get("product_name") or it.get("name",""),
+                        "quantity": it.get("quantity",1),
+                        "unit_price_cents": it.get("price_cents_snapshot") or it.get("unit_price_cents",0),
+                        "notes": it.get("notes",""),
+                        "addons": it.get("addons_json") or it.get("addons",[]),
+                    }
+                    for it in raw_items
+                ]
+            log.info("[ORDER] OK")
         else: log.error(f"[ORDER] Falha {oid}")
 
     # Resolve impressora com suporte a multi-rede
@@ -585,19 +601,27 @@ def proc_job(job):
     if len(_stats["historico"]) > 50:
         _stats["historico"] = _stats["historico"][:50]
 
+_jobs_em_proc = set()  # Evita processar o mesmo job duas vezes
+
 def poll():
     global status_poll
     jobs=ef_poll_jobs()
-    if jobs:
-        status_poll=f"Ativo - {len(jobs)} job(s)"
-        log.info(f"[POLL] {len(jobs)} job(s)")
-        for job in jobs:
-            ef_update_job(job["id"],"sent")
-            threading.Thread(target=proc_job,args=(job,),daemon=True).start()
+    novos = [j for j in jobs if j.get("id") not in _jobs_em_proc]
+    if novos:
+        status_poll=f"Ativo - {len(novos)} job(s)"
+        log.info(f"[POLL] {len(novos)} job(s)")
+        for job in novos:
+            jid = job["id"]
+            _jobs_em_proc.add(jid)
+            ef_update_job(jid, "sent")
+            def _run(j=job):
+                try: proc_job(j)
+                finally: _jobs_em_proc.discard(j["id"])
+            threading.Thread(target=_run, daemon=True).start()
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "3.8"
+CURRENT_VERSION = "3.9"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 async def checar_atualizacao():
@@ -764,7 +788,7 @@ def abrir_boasvindas():
     btn.pack(fill="x", padx=24, pady=(0,8))
     te.bind("<Return>", lambda e: conectar())
 
-    tk.Label(w, text="Concentrador de Impressoes e Dispositivos  .  Delmatch  .  v3.6",
+    tk.Label(w, text=f"Concentrador de Impressoes e Dispositivos  .  Delmatch  .  v{CURRENT_VERSION}",
              bg="#1a1a2e", fg="#45475a", font=("Segoe UI", 8)).pack(pady=(4,16))
 
 
@@ -1527,9 +1551,17 @@ def abrir_config():
     def salvar():
         global cfg
         cfg["token"]=tv.get().strip(); cfg["poll_interval"]=int(pv.get().strip() or "3")
+        # Index das impressoras atuais para preservar printer_type
+        imps_orig = {i.get("nome","").strip().lower(): i for i in cfg.get("impressoras",[])}
         imps=[]
         for item in ti.get_children():
-            v=ti.item(item,"values"); imps.append({"nome":v[0],"area":v[1],"nome_impressora":v[2],"tipo":v[3],"modo":"texto"})
+            v=ti.item(item,"values")
+            nome=v[0]; area=v[1]; nome_win=v[2]; tipo=v[3]
+            orig = imps_orig.get(nome.strip().lower(), {})
+            # Deriva printer_type da area se nao existir na config original
+            pt_map = {"caixa":"receipt","cozinha":"kitchen","bar":"bar","delivery":"receipt"}
+            printer_type = orig.get("printer_type") or pt_map.get(area.strip().lower(), "receipt")
+            imps.append({"nome":nome,"area":area,"nome_impressora":nome_win,"tipo":tipo,"modo":"texto","printer_type":printer_type})
         cfg["impressoras"]=imps; bals=[]
         for item in tb2.get_children():
             v=tb2.item(item,"values"); n2,t2,c3,b2=v[0],v[1],v[2],v[3]
@@ -1583,19 +1615,24 @@ def abrir_config():
 
 def reiniciar_app():
     log.info("Reiniciando agente...")
-    import subprocess
-    subprocess.Popen([sys.executable, __file__])
+    exe = sys.executable
+    bat = BASE_DIR / "restart.bat"
+    bat.write_text(
+        "@echo off\r\n"
+        "timeout /t 2 /nobreak >nul\r\n"
+        f'start \"\" \"{exe}\"\r\n'
+        'del \"%~f0\"\r\n',
+        encoding="utf-8"
+    )
+    subprocess.Popen(["cmd", "/c", str(bat)], creationflags=subprocess.CREATE_NO_WINDOW)
     os._exit(0)
 
 
 
 
-VERSION = "3.6"
-GITHUB_USER  = "delmatch-user"
-GITHUB_REPO  = "agente-local-releases"
-GITHUB_TOKEN = "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"
-
 def verificar_atualizacao():
+    # Deprecated: replaced by checar_atualizacao() inside loop_poll()
+    return
     try:
         import urllib.request, json, os, sys, tempfile
         # Tenta pegar version.json
@@ -1730,7 +1767,7 @@ def _check():
     _root.after(300, _check)
 
 if __name__ == "__main__":
-    log.info("=== Concentrador de Impressoes e Dispositivos v3.6 iniciando ===")
+    log.info(f"=== Concentrador de Impressoes e Dispositivos v{CURRENT_VERSION} iniciando ===")
 
     # Garante startup no Windows
     _garantir_startup()
@@ -1781,16 +1818,7 @@ if __name__ == "__main__":
                 log.error(f"[POLL] Crash: {e} - reiniciando em 5s")
                 import time as _t; _t.sleep(5)
 
-    def _run_update_safe():
-        while True:
-            try:
-                asyncio.run(loop_update())
-            except Exception as e:
-                log.error(f"[UPDATE] Crash: {e}")
-                import time as _t; _t.sleep(60)
-
     threading.Thread(target=_run_polling_safe, daemon=True).start()
-    threading.Thread(target=_run_update_safe,  daemon=True).start()
 
     # Fecha janela = minimiza para bandeja
     def _on_close():
