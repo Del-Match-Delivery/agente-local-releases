@@ -101,73 +101,73 @@ def _atualizar_icone():
 
 
 def _garantir_startup():
-    """Garante startup via registro HKCU - metodo mais confiavel"""
-    import winreg, sys
-    from pathlib import Path
+    """Garante que registro e atalho de startup sempre apontam para AgenteLocal.exe"""
     try:
+        # Resolve o exe canonico (sempre AgenteLocal.exe na pasta dist)
         if getattr(sys, 'frozen', False):
-            # Usa variavel de ambiente para evitar problema com acento no username
-            import os
-            exe = os.path.join(os.environ.get("USERPROFILE", str(Path.home())),
-                               "Desktop", "Agente Local", "dist", "AgenteLocal.exe")
+            exe = str(BASE_DIR / "AgenteLocal.exe")
             if not Path(exe).exists():
                 exe = str(Path(sys.executable).resolve())
         else:
             exe = str((Path(__file__).resolve().parent / "dist" / "AgenteLocal.exe"))
-        
+
         if not Path(exe).exists():
             log.warning(f"[STARTUP] exe nao encontrado: {exe}")
             return
-            
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0, winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE
-        )
-        
-        # Verifica se ja esta correto
+
+        # Corrige registro HKCU Run (sempre sobrescreve se diferente)
         try:
-            val, _ = winreg.QueryValueEx(key, "AgenteLocal")
-            if val == exe:
-                log.info(f"[STARTUP] Ja registrado corretamente: {exe}")
-                winreg.CloseKey(key)
-                return
-        except FileNotFoundError:
-            pass
-        
-        winreg.SetValueEx(key, "AgenteLocal", 0, winreg.REG_SZ, exe)
-        winreg.CloseKey(key)
-        log.info(f"[STARTUP] Registrado: {exe}")
-        
-        # Cria tambem um VBS como backup (nao precisa de admin)
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                 0, winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE)
+            try:
+                val, _ = winreg.QueryValueEx(key, "AgenteLocal")
+                if val != exe:
+                    winreg.SetValueEx(key, "AgenteLocal", 0, winreg.REG_SZ, exe)
+                    log.info(f"[STARTUP] Registro corrigido: {val} -> {exe}")
+                else:
+                    log.info(f"[STARTUP] Registro OK: {exe}")
+            except FileNotFoundError:
+                winreg.SetValueEx(key, "AgenteLocal", 0, winreg.REG_SZ, exe)
+                log.info(f"[STARTUP] Registro criado: {exe}")
+            winreg.CloseKey(key)
+        except Exception as e:
+            log.warning(f"[STARTUP] Registro falhou: {e}")
+
+        # Corrige atalho .lnk na pasta Startup (sempre recria se TargetPath diferente)
         try:
-            vbs_path = Path(exe).parent / "iniciar_agente.vbs"
-            vbs_content = f'Set ws = CreateObject("WScript.Shell")\nws.Run Chr(34) & "{exe}" & Chr(34), 0, False'
-            vbs_path.write_text(vbs_content, encoding='utf-8')
-            
             startup_folder = Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
             if startup_folder.exists():
                 lnk_path = startup_folder / "AgenteLocal MIA.lnk"
-                import subprocess
-                ps = (
-                    f'$ws=New-Object -ComObject WScript.Shell;'
-                    f'$s=$ws.CreateShortcut("{lnk_path}");'
-                    f'$s.TargetPath="{exe}";'
-                    f'$s.WorkingDirectory="{Path(exe).parent}";'
-                    f'$s.WindowStyle=7;'
-                    f'$s.Save()'
-                )
-                subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", ps],
-                    capture_output=True, timeout=10
-                )
+                # Verifica se o atalho existente ja aponta para o exe correto
+                precisa_recriar = True
                 if lnk_path.exists():
-                    log.info(f"[STARTUP] Atalho na pasta Startup criado: {lnk_path}")
+                    try:
+                        check_ps = f'$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut("{lnk_path}"); Write-Output $s.TargetPath'
+                        r = subprocess.run(["powershell", "-NoProfile", "-Command", check_ps],
+                                           capture_output=True, text=True, timeout=5)
+                        target_atual = r.stdout.strip()
+                        if target_atual.lower() == exe.lower():
+                            precisa_recriar = False
+                            log.info(f"[STARTUP] Atalho Startup OK: {lnk_path}")
+                    except Exception:
+                        pass
+
+                if precisa_recriar:
+                    ps = (f'$ws=New-Object -ComObject WScript.Shell;'
+                          f'$s=$ws.CreateShortcut("{lnk_path}");'
+                          f'$s.TargetPath="{exe}";'
+                          f'$s.WorkingDirectory="{Path(exe).parent}";'
+                          f'$s.WindowStyle=7;'
+                          f'$s.Save()')
+                    subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                                   capture_output=True, timeout=10)
+                    log.info(f"[STARTUP] Atalho Startup corrigido -> {exe}")
         except Exception as e:
-            log.warning(f"[STARTUP] VBS/Startup backup falhou: {e}")
-            
+            log.warning(f"[STARTUP] Atalho falhou: {e}")
+
     except Exception as e:
-        log.error(f"[STARTUP] Erro ao registrar startup: {e}")
+        log.error(f"[STARTUP] Erro: {e}")
 
 def iniciar_tray():
     global _tray_icon
@@ -619,7 +619,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "4.6"
+CURRENT_VERSION = "4.7"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 def _baixar_e_aplicar_update(nova, url_nova):
