@@ -208,19 +208,17 @@ def _post(url, data, token, timeout=30, retries=2):
                 return None, 0
 
 def ef_poll_jobs():
-    # Coleta areas unicas configuradas nas impressoras
     imps = cfg.get("impressoras", [])
     areas = list(set([i.get("area","").strip().lower() for i in imps if i.get("area","").strip() and i.get("nome_impressora")]))
     payload = {"action": "poll"}
     if areas:
         payload["areas"] = areas
-        log.debug(f"[POLL] Filtrando areas: {areas}")
+    log.info(f"[POLL] Enviando payload: {payload} | token: {cfg.get('token','')[:12]}...")
     resp,s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, cfg.get("token",""))
+    log.info(f"[POLL] Resposta HTTP {s}: {str(resp)[:300]}")
     if s==200 and resp:
-        # Servidor retorna print_jobs (com jobs como alias legacy)
         jobs = resp.get("print_jobs") or resp.get("jobs") or []
         if isinstance(resp, list): jobs = resp
-        log.debug(f"[POLL] {len(jobs)} job(s) recebido(s)")
         return jobs
     if s!=200: log.error(f"[POLL] {s}: {resp}")
     return []
@@ -621,7 +619,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "4.4"
+CURRENT_VERSION = "4.5"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 def _baixar_e_aplicar_update(nova, url_nova):

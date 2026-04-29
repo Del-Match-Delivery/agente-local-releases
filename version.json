@@ -1,5 +1,5 @@
 {
-  "version": "4.4",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v4.4/AgenteLocal.exe",
-  "notes": "Fix loop infinito de update: bat agora copia para AgenteLocal.exe fixo e usa taskkill para liberar o arquivo"
+  "version": "4.5",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v4.5/AgenteLocal.exe",
+  "notes": "Diagnostico: log detalhado do poll para identificar por que jobs nao chegam"
 }
