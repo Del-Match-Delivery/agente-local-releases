@@ -1,5 +1,5 @@
 {
-  "version": "4.2",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v4.2/AgenteLocal.exe",
-  "notes": "Fix auto-update: download em thread separada, nao trava o poll durante atualizacao"
+  "version": "4.3",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v4.3/AgenteLocal.exe",
+  "notes": "Verifica atualizacoes a cada 5 minutos para propagacao rapida"
 }

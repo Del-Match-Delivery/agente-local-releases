@@ -621,7 +621,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "4.2"
+CURRENT_VERSION = "4.3"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 def _baixar_e_aplicar_update(nova, url_nova):
@@ -687,9 +687,9 @@ async def loop_poll():
         if ciclos % max(1, int(300 / max(iv,1))) == 0:
             try: sincronizar_impressoras()
             except Exception as e: log.error(f"[SYNC] {e}")
-        # Verifica atualizacao a cada hora
+        # Verifica atualizacao a cada 5 minutos
         agora = time.time()
-        if agora - ultimo_update_check >= 3600:
+        if agora - ultimo_update_check >= 300:
             ultimo_update_check = agora
             try: await checar_atualizacao()
             except Exception as e: log.debug(f"[UPDATE] {e}")
