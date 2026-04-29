@@ -1,5 +1,5 @@
 {
-  "version": "5.0",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.0/AgenteLocal.exe",
-  "notes": "Fix critico: jobs nao chegavam pois eram marcados como 'sent' antes de imprimir, saindo da fila pending"
+  "version": "5.1",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.1/AgenteLocal.exe",
+  "notes": "Fix update: bat usa %%P correto e PowerShell para relançar exe com caminhos com espacos"
 }
