@@ -1,5 +1,5 @@
 {
-  "version": "4.8",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v4.8/AgenteLocal.exe",
-  "notes": "Limpeza automatica de exes versionados antigos no boot"
+  "version": "4.9",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v4.9/AgenteLocal.exe",
+  "notes": "Fix bat: usa WMIC para matar todos processos AgenteLocal por PID, sem wildcard"
 }

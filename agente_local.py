@@ -619,7 +619,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "4.8"
+CURRENT_VERSION = "4.9"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 def _baixar_e_aplicar_update(nova, url_nova):
@@ -642,7 +642,7 @@ def _baixar_e_aplicar_update(nova, url_nova):
         bat.write_text(
             "@echo off\r\n"
             # Mata TODOS os processos do agente pelo nome (resolve multi-instancia)
-            "taskkill /F /IM AgenteLocal*.exe >nul 2>&1\r\n"
+            "for /f \"tokens=2\" %P in ('wmic process where \"name like 'AgenteLocal%%'\" get ProcessId /format:list 2^>nul ^| findstr ProcessId') do taskkill /F /PID %P >nul 2>&1\r\n"
             "timeout /t 2 /nobreak >nul\r\n"
             # Copia para AgenteLocal.exe (nome canonico fixo)
             f'copy /y "{exe_novo}" "{exe_destino}" >nul\r\n'
@@ -934,7 +934,7 @@ def abrir_dashboard():
                             bat = BASE_DIR / "update_apply.bat"
                             bat.write_text(
                                 "@echo off\r\n"
-                                "taskkill /F /IM AgenteLocal*.exe >nul 2>&1\r\n"
+                                "for /f \"tokens=2\" %P in ('wmic process where \"name like 'AgenteLocal%%'\" get ProcessId /format:list 2^>nul ^| findstr ProcessId') do taskkill /F /PID %P >nul 2>&1\r\n"
                                 "timeout /t 2 /nobreak >nul\r\n"
                                 f'copy /y "{exe_novo}" "{exe_destino}" >nul\r\n'
                                 f'del /f /q "{exe_novo}" >nul 2>&1\r\n'
