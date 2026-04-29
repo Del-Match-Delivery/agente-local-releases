@@ -621,26 +621,22 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "4.1"
+CURRENT_VERSION = "4.2"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
-async def checar_atualizacao():
-    """Verifica nova versao silenciosamente e reinicia com a versao mais recente."""
-    if not getattr(sys, "frozen", False):
-        return  # Nao atualiza quando rodando como script
+def _baixar_e_aplicar_update(nova, url_nova):
+    """Roda em thread separada: baixa o exe novo e aplica sem travar o poll."""
     try:
-        req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            info = json.loads(r.read())
-        nova = info.get("version", "")
-        url_nova = info.get("url", "")
-        if not nova or not url_nova or nova == CURRENT_VERSION:
-            return
-        log.info(f"[UPDATE] Nova versao {nova} disponivel. Baixando...")
         exe_novo = BASE_DIR / f"AgenteLocal_{nova}.exe"
-        urllib.request.urlretrieve(url_nova, exe_novo)
+        log.info(f"[UPDATE] Baixando v{nova}...")
+        req = urllib.request.Request(url_nova)
+        with urllib.request.urlopen(req, timeout=120) as r, open(exe_novo, "wb") as f:
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
         log.info(f"[UPDATE] Download concluido: {exe_novo}")
-        # Script .bat substitui o exe atual e reinicia
         bat = BASE_DIR / "update_apply.bat"
         bat.write_text(
             "@echo off\r\n"
@@ -656,6 +652,23 @@ async def checar_atualizacao():
         )
         log.info("[UPDATE] Reiniciando para aplicar atualizacao...")
         sys.exit(0)
+    except Exception as e:
+        log.warning(f"[UPDATE] Falha no download: {e}")
+
+async def checar_atualizacao():
+    """Verifica nova versao silenciosamente; download em thread para nao travar o poll."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            info = json.loads(r.read())
+        nova = info.get("version", "")
+        url_nova = info.get("url", "")
+        if not nova or not url_nova or nova == CURRENT_VERSION:
+            return
+        log.info(f"[UPDATE] Nova versao {nova} disponivel. Iniciando download em background...")
+        threading.Thread(target=_baixar_e_aplicar_update, args=(nova, url_nova), daemon=True).start()
     except Exception as e:
         log.debug(f"[UPDATE] {e}")
 
