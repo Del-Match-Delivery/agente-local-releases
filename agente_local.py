@@ -210,7 +210,7 @@ def _post(url, data, token, timeout=30, retries=2):
 def ef_poll_jobs():
     # Coleta areas unicas configuradas nas impressoras
     imps = cfg.get("impressoras", [])
-    areas = list(set([i.get("area","").strip() for i in imps if i.get("area","").strip() and i.get("nome_impressora")]))
+    areas = list(set([i.get("area","").strip().lower() for i in imps if i.get("area","").strip() and i.get("nome_impressora")]))
     payload = {"action": "poll"}
     if areas:
         payload["areas"] = areas
@@ -512,7 +512,7 @@ def _res_imp(pt):
     imps=cfg.get("impressoras",[])
     areas={"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"]}.get(pt,["caixa"])
     for i in imps:
-        if i.get("area","").strip() in areas or i.get("printer_type")==pt:
+        if i.get("area","").strip().lower() in areas or i.get("printer_type")==pt:
             n=i.get("nome_impressora","")
             if n: return n
     if imps: return imps[0].get("nome_impressora","")
@@ -621,7 +621,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "4.0"
+CURRENT_VERSION = "4.1"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 async def checar_atualizacao():
