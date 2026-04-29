@@ -621,7 +621,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "3.9"
+CURRENT_VERSION = "4.0"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 async def checar_atualizacao():
@@ -876,6 +876,64 @@ def abrir_dashboard():
     tk.Button(bf, text="Ver Log", command=abrir_log,
               bg="#313244", fg="#cdd6f4", font=("Segoe UI",9,"bold"),
               relief="flat", padx=12, pady=6, cursor="hand2").pack(side="left", padx=4)
+
+    btn_upd = tk.Button(bf, text="Atualizar Sistema",
+                        bg="#a6e3a1", fg="#1e1e2e", font=("Segoe UI",9,"bold"),
+                        relief="flat", padx=12, pady=6, cursor="hand2")
+    btn_upd.pack(side="left", padx=4)
+
+    def verificar_atualizacao_manual():
+        btn_upd.config(text="Verificando...", state="disabled", bg="#89b4fa")
+        def _run():
+            try:
+                req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    info = json.loads(r.read())
+                nova = info.get("version", "")
+                url_nova = info.get("url", "")
+                if not nova or not url_nova:
+                    w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
+                                        messagebox.showwarning("Aviso", "Nao foi possivel verificar atualizacao.", parent=w)))
+                    return
+                if nova == CURRENT_VERSION:
+                    w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
+                                        messagebox.showinfo("Atualizado", f"Voce ja esta na versao mais recente (v{CURRENT_VERSION}).", parent=w)))
+                    return
+                # Ha versao nova
+                def _confirmar():
+                    if not messagebox.askyesno("Atualizar", f"Nova versao v{nova} disponivel!\nDeseja atualizar agora?", parent=w):
+                        btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1")
+                        return
+                    btn_upd.config(text="Baixando...", bg="#f9e2af")
+                    def _baixar():
+                        try:
+                            exe_novo = BASE_DIR / f"AgenteLocal_{nova}.exe"
+                            urllib.request.urlretrieve(url_nova, exe_novo)
+                            bat = BASE_DIR / "update_apply.bat"
+                            bat.write_text(
+                                "@echo off\r\n"
+                                "timeout /t 3 /nobreak >nul\r\n"
+                                f'move /y "{exe_novo}" "{sys.executable}"\r\n'
+                                f'start "" "{sys.executable}"\r\n'
+                                'del "%~f0"\r\n',
+                                encoding="utf-8"
+                            )
+                            subprocess.Popen(["cmd", "/c", str(bat)], creationflags=subprocess.CREATE_NO_WINDOW)
+                            log.info(f"[UPDATE] Atualizando para v{nova} via botao manual")
+                            w.after(0, lambda: messagebox.showinfo("Atualizando", f"Atualizando para v{nova}...\nO agente vai reiniciar automaticamente.", parent=w))
+                            w.after(500, sys.exit)
+                        except Exception as e:
+                            w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
+                                                messagebox.showerror("Erro", f"Falha ao baixar atualizacao:\n{e}", parent=w)))
+                    threading.Thread(target=_baixar, daemon=True).start()
+                w.after(0, _confirmar)
+            except Exception as e:
+                w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
+                                    messagebox.showerror("Erro", f"Falha ao verificar atualizacao:\n{e}", parent=w)))
+        threading.Thread(target=_run, daemon=True).start()
+
+    btn_upd.config(command=verificar_atualizacao_manual)
+
     tk.Button(bf, text="Fechar", command=w.destroy,
               bg="#313244", fg="#cdd6f4", font=("Segoe UI",9,"bold"),
               relief="flat", padx=12, pady=6, cursor="hand2").pack(side="right", padx=4)
