@@ -621,7 +621,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "4.3"
+CURRENT_VERSION = "4.4"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 def _baixar_e_aplicar_update(nova, url_nova):
@@ -637,12 +637,21 @@ def _baixar_e_aplicar_update(nova, url_nova):
                     break
                 f.write(chunk)
         log.info(f"[UPDATE] Download concluido: {exe_novo}")
+        # Destino sempre AgenteLocal.exe na mesma pasta, independente do nome atual
+        exe_destino = BASE_DIR / "AgenteLocal.exe"
+        exe_atual = Path(sys.executable)
         bat = BASE_DIR / "update_apply.bat"
         bat.write_text(
             "@echo off\r\n"
-            "timeout /t 3 /nobreak >nul\r\n"
-            f'move /y "{exe_novo}" "{sys.executable}"\r\n'
-            f'start "" "{sys.executable}"\r\n'
+            # Mata o processo atual pelo PID para garantir que o arquivo esta livre
+            f'taskkill /PID {os.getpid()} /F >nul 2>&1\r\n'
+            "timeout /t 2 /nobreak >nul\r\n"
+            # Copia para AgenteLocal.exe (nome canonico)
+            f'copy /y "{exe_novo}" "{exe_destino}" >nul\r\n'
+            f'del /f /q "{exe_novo}" >nul 2>&1\r\n'
+            # Se o exe atual tem nome diferente de AgenteLocal.exe, remove o antigo
+            + (f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else "") +
+            f'start "" "{exe_destino}"\r\n'
             'del "%~f0"\r\n',
             encoding="utf-8"
         )
@@ -922,12 +931,17 @@ def abrir_dashboard():
                         try:
                             exe_novo = BASE_DIR / f"AgenteLocal_{nova}.exe"
                             urllib.request.urlretrieve(url_nova, exe_novo)
+                            exe_destino = BASE_DIR / "AgenteLocal.exe"
+                            exe_atual = Path(sys.executable)
                             bat = BASE_DIR / "update_apply.bat"
                             bat.write_text(
                                 "@echo off\r\n"
-                                "timeout /t 3 /nobreak >nul\r\n"
-                                f'move /y "{exe_novo}" "{sys.executable}"\r\n'
-                                f'start "" "{sys.executable}"\r\n'
+                                f'taskkill /PID {os.getpid()} /F >nul 2>&1\r\n'
+                                "timeout /t 2 /nobreak >nul\r\n"
+                                f'copy /y "{exe_novo}" "{exe_destino}" >nul\r\n'
+                                f'del /f /q "{exe_novo}" >nul 2>&1\r\n'
+                                + (f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else "") +
+                                f'start "" "{exe_destino}"\r\n'
                                 'del "%~f0"\r\n',
                                 encoding="utf-8"
                             )
