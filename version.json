@@ -1,5 +1,5 @@
 {
-  "version": "4.5",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v4.5/AgenteLocal.exe",
-  "notes": "Diagnostico: log detalhado do poll para identificar por que jobs nao chegam"
+  "version": "4.6",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v4.6/AgenteLocal.exe",
+  "notes": "Fix critico: mutex impede multiplas instancias, bat mata todos os processos do agente antes de atualizar"
 }

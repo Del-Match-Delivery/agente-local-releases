@@ -619,7 +619,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "4.5"
+CURRENT_VERSION = "4.6"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 def _baixar_e_aplicar_update(nova, url_nova):
@@ -641,13 +641,13 @@ def _baixar_e_aplicar_update(nova, url_nova):
         bat = BASE_DIR / "update_apply.bat"
         bat.write_text(
             "@echo off\r\n"
-            # Mata o processo atual pelo PID para garantir que o arquivo esta livre
-            f'taskkill /PID {os.getpid()} /F >nul 2>&1\r\n'
+            # Mata TODOS os processos do agente pelo nome (resolve multi-instancia)
+            "taskkill /F /IM AgenteLocal*.exe >nul 2>&1\r\n"
             "timeout /t 2 /nobreak >nul\r\n"
-            # Copia para AgenteLocal.exe (nome canonico)
+            # Copia para AgenteLocal.exe (nome canonico fixo)
             f'copy /y "{exe_novo}" "{exe_destino}" >nul\r\n'
             f'del /f /q "{exe_novo}" >nul 2>&1\r\n'
-            # Se o exe atual tem nome diferente de AgenteLocal.exe, remove o antigo
+            # Remove exe versionado antigo se existir
             + (f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else "") +
             f'start "" "{exe_destino}"\r\n'
             'del "%~f0"\r\n',
@@ -934,7 +934,7 @@ def abrir_dashboard():
                             bat = BASE_DIR / "update_apply.bat"
                             bat.write_text(
                                 "@echo off\r\n"
-                                f'taskkill /PID {os.getpid()} /F >nul 2>&1\r\n'
+                                "taskkill /F /IM AgenteLocal*.exe >nul 2>&1\r\n"
                                 "timeout /t 2 /nobreak >nul\r\n"
                                 f'copy /y "{exe_novo}" "{exe_destino}" >nul\r\n'
                                 f'del /f /q "{exe_novo}" >nul 2>&1\r\n'
@@ -1850,6 +1850,14 @@ def _check():
     _root.after(300, _check)
 
 if __name__ == "__main__":
+    # Garante instancia unica via mutex do Windows
+    if getattr(sys, 'frozen', False):
+        import ctypes
+        _mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "AgenteLocalMIA_SingleInstance")
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            log.warning("[STARTUP] Outra instancia ja esta rodando. Encerrando.")
+            sys.exit(0)
+
     log.info(f"=== Concentrador de Impressoes e Dispositivos v{CURRENT_VERSION} iniciando ===")
 
     # Garante startup no Windows
