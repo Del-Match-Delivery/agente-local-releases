@@ -629,11 +629,38 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.4"
+CURRENT_VERSION = "5.5"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
+
+_update_em_andamento = False  # evita multiplos downloads simultaneos
+
+def _bat_update(exe_novo: Path, exe_destino: Path, del_extra: str = "") -> str:
+    """Gera conteudo do bat de update. Mata processos, move com retry, lanca UMA vez."""
+    return (
+        "@echo off\r\n"
+        # Mata todos os processos AgenteLocal pelo PID via WMIC
+        "for /f \"tokens=2\" %%P in ('wmic process where \"name like 'AgenteLocal%%'\" get ProcessId /format:list 2^>nul ^| findstr ProcessId') do taskkill /F /PID %%P >nul 2>&1\r\n"
+        # Espera 8s para o processo liberar o arquivo
+        "timeout /t 8 /nobreak >nul\r\n"
+        # Move com retry ate ter sucesso
+        ":retry\r\n"
+        f'move /y "{exe_novo}" "{exe_destino}" >nul 2>&1\r\n'
+        "if errorlevel 1 (\r\n"
+        "  timeout /t 3 /nobreak >nul\r\n"
+        "  goto retry\r\n"
+        ")\r\n"
+        + del_extra +
+        # Verifica se ja tem instancia rodando antes de lancar
+        "tasklist /FI \"IMAGENAME eq AgenteLocal.exe\" 2>nul | find /I \"AgenteLocal.exe\" >nul\r\n"
+        "if errorlevel 1 (\r\n"
+        f'  powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe_destino}\'"\r\n'
+        ")\r\n"
+        'del "%~f0"\r\n'
+    )
 
 def _baixar_e_aplicar_update(nova, url_nova):
     """Roda em thread separada: baixa o exe novo e aplica sem travar o poll."""
+    global _update_em_andamento
     try:
         exe_novo = BASE_DIR / f"AgenteLocal_{nova}.exe"
         log.info(f"[UPDATE] Baixando v{nova}...")
@@ -645,30 +672,11 @@ def _baixar_e_aplicar_update(nova, url_nova):
                     break
                 f.write(chunk)
         log.info(f"[UPDATE] Download concluido: {exe_novo}")
-        # Destino sempre AgenteLocal.exe na mesma pasta, independente do nome atual
         exe_destino = BASE_DIR / "AgenteLocal.exe"
         exe_atual = Path(sys.executable)
+        del_extra = f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else ""
         bat = BASE_DIR / "update_apply.bat"
-        del_antigo = f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else ""
-        bat.write_text(
-            "@echo off\r\n"
-            # Mata TODOS os processos do agente pelo nome via WMIC
-            "for /f \"tokens=2\" %%P in ('wmic process where \"name like 'AgenteLocal%%'\" get ProcessId /format:list 2^>nul ^| findstr ProcessId') do taskkill /F /PID %%P >nul 2>&1\r\n"
-            # Aguarda processo liberar o arquivo (8s para garantir)
-            "timeout /t 8 /nobreak >nul\r\n"
-            # Tenta move (renomear) em loop ate funcionar - move atomico no Windows
-            ":retry\r\n"
-            f'move /y "{exe_novo}" "{exe_destino}" >nul 2>&1\r\n'
-            "if errorlevel 1 (\r\n"
-            "  timeout /t 3 /nobreak >nul\r\n"
-            "  goto retry\r\n"
-            ")\r\n"
-            + del_antigo +
-            # Usa PowerShell para lançar sem problemas com caminhos com espacos
-            f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe_destino}\'" \r\n'
-            'del "%~f0"\r\n',
-            encoding="utf-8"
-        )
+        bat.write_text(_bat_update(exe_novo, exe_destino, del_extra), encoding="utf-8")
         subprocess.Popen(
             ["cmd", "/c", str(bat)],
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
@@ -677,10 +685,14 @@ def _baixar_e_aplicar_update(nova, url_nova):
         sys.exit(0)
     except Exception as e:
         log.warning(f"[UPDATE] Falha no download: {e}")
+        _update_em_andamento = False
 
 async def checar_atualizacao():
     """Verifica nova versao silenciosamente; download em thread para nao travar o poll."""
+    global _update_em_andamento
     if not getattr(sys, "frozen", False):
+        return
+    if _update_em_andamento:
         return
     try:
         req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
@@ -690,7 +702,8 @@ async def checar_atualizacao():
         url_nova = info.get("url", "")
         if not nova or not url_nova or nova == CURRENT_VERSION:
             return
-        log.info(f"[UPDATE] Nova versao {nova} disponivel. Iniciando download em background...")
+        _update_em_andamento = True
+        log.info(f"[UPDATE] Nova versao {nova} disponivel. Baixando...")
         threading.Thread(target=_baixar_e_aplicar_update, args=(nova, url_nova), daemon=True).start()
     except Exception as e:
         log.debug(f"[UPDATE] {e}")
@@ -947,23 +960,9 @@ def abrir_dashboard():
                             urllib.request.urlretrieve(url_nova, exe_novo)
                             exe_destino = BASE_DIR / "AgenteLocal.exe"
                             exe_atual = Path(sys.executable)
+                            del_extra2 = f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else ""
                             bat = BASE_DIR / "update_apply.bat"
-                            del_antigo2 = f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else ""
-                            bat.write_text(
-                                "@echo off\r\n"
-                                "for /f \"tokens=2\" %%P in ('wmic process where \"name like 'AgenteLocal%%'\" get ProcessId /format:list 2^>nul ^| findstr ProcessId') do taskkill /F /PID %%P >nul 2>&1\r\n"
-                                "timeout /t 8 /nobreak >nul\r\n"
-                                ":retry2\r\n"
-                                f'move /y "{exe_novo}" "{exe_destino}" >nul 2>&1\r\n'
-                                "if errorlevel 1 (\r\n"
-                                "  timeout /t 3 /nobreak >nul\r\n"
-                                "  goto retry2\r\n"
-                                ")\r\n"
-                                + del_antigo2 +
-                                f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe_destino}\'" \r\n'
-                                'del "%~f0"\r\n',
-                                encoding="utf-8"
-                            )
+                            bat.write_text(_bat_update(exe_novo, exe_destino, del_extra2), encoding="utf-8")
                             subprocess.Popen(["cmd", "/c", str(bat)], creationflags=subprocess.CREATE_NO_WINDOW)
                             log.info(f"[UPDATE] Atualizando para v{nova} via botao manual")
                             w.after(0, lambda: messagebox.showinfo("Atualizando", f"Atualizando para v{nova}...\nO agente vai reiniciar automaticamente.", parent=w))

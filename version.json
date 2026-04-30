@@ -1,5 +1,5 @@
 {
-  "version": "5.4",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.4/AgenteLocal.exe",
-  "notes": "v5.4: Corrige loop infinito de update - usa move atomico com retry no bat, delay maior para liberar arquivo."
+  "version": "5.5",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.5/AgenteLocal.exe",
+  "notes": "v5.5: Corrige multiplas instancias - flag de update unico, bat verifica se ja existe processo antes de lancar."
 }
