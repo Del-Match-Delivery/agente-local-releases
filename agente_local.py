@@ -629,7 +629,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.3"
+CURRENT_VERSION = "5.4"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 def _baixar_e_aplicar_update(nova, url_nova):
@@ -654,10 +654,15 @@ def _baixar_e_aplicar_update(nova, url_nova):
             "@echo off\r\n"
             # Mata TODOS os processos do agente pelo nome via WMIC
             "for /f \"tokens=2\" %%P in ('wmic process where \"name like 'AgenteLocal%%'\" get ProcessId /format:list 2^>nul ^| findstr ProcessId') do taskkill /F /PID %%P >nul 2>&1\r\n"
-            "timeout /t 3 /nobreak >nul\r\n"
-            # Copia para AgenteLocal.exe (nome canonico fixo)
-            f'copy /y "{exe_novo}" "{exe_destino}" >nul\r\n'
-            f'del /f /q "{exe_novo}" >nul 2>&1\r\n'
+            # Aguarda processo liberar o arquivo (8s para garantir)
+            "timeout /t 8 /nobreak >nul\r\n"
+            # Tenta move (renomear) em loop ate funcionar - move atomico no Windows
+            ":retry\r\n"
+            f'move /y "{exe_novo}" "{exe_destino}" >nul 2>&1\r\n'
+            "if errorlevel 1 (\r\n"
+            "  timeout /t 3 /nobreak >nul\r\n"
+            "  goto retry\r\n"
+            ")\r\n"
             + del_antigo +
             # Usa PowerShell para lançar sem problemas com caminhos com espacos
             f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe_destino}\'" \r\n'
@@ -943,14 +948,19 @@ def abrir_dashboard():
                             exe_destino = BASE_DIR / "AgenteLocal.exe"
                             exe_atual = Path(sys.executable)
                             bat = BASE_DIR / "update_apply.bat"
+                            del_antigo2 = f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else ""
                             bat.write_text(
                                 "@echo off\r\n"
-                                "for /f \"tokens=2\" %P in ('wmic process where \"name like 'AgenteLocal%%'\" get ProcessId /format:list 2^>nul ^| findstr ProcessId') do taskkill /F /PID %P >nul 2>&1\r\n"
-                                "timeout /t 2 /nobreak >nul\r\n"
-                                f'copy /y "{exe_novo}" "{exe_destino}" >nul\r\n'
-                                f'del /f /q "{exe_novo}" >nul 2>&1\r\n'
-                                + (f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else "") +
-                                f'start "" "{exe_destino}"\r\n'
+                                "for /f \"tokens=2\" %%P in ('wmic process where \"name like 'AgenteLocal%%'\" get ProcessId /format:list 2^>nul ^| findstr ProcessId') do taskkill /F /PID %%P >nul 2>&1\r\n"
+                                "timeout /t 8 /nobreak >nul\r\n"
+                                ":retry2\r\n"
+                                f'move /y "{exe_novo}" "{exe_destino}" >nul 2>&1\r\n'
+                                "if errorlevel 1 (\r\n"
+                                "  timeout /t 3 /nobreak >nul\r\n"
+                                "  goto retry2\r\n"
+                                ")\r\n"
+                                + del_antigo2 +
+                                f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe_destino}\'" \r\n'
                                 'del "%~f0"\r\n',
                                 encoding="utf-8"
                             )

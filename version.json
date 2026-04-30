@@ -1,5 +1,5 @@
 {
-  "version": "5.3",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.3/AgenteLocal.exe",
-  "notes": "v5.3: Aba Agentes carrega em tempo real, config de impressoras preservada, limpeza de exe antigo corrigida."
+  "version": "5.4",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.4/AgenteLocal.exe",
+  "notes": "v5.4: Corrige loop infinito de update - usa move atomico com retry no bat, delay maior para liberar arquivo."
 }
