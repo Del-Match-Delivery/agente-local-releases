@@ -1,5 +1,5 @@
 {
-  "version": "5.2",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.2/AgenteLocal.exe",
-  "notes": "Multi-agente: cada PC registra suas areas no servidor, recebe somente jobs da sua impressora. Nova aba Agentes mostra quem esta online."
+  "version": "5.3",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.3/AgenteLocal.exe",
+  "notes": "v5.3: Aba Agentes carrega em tempo real, config de impressoras preservada, limpeza de exe antigo corrigida."
 }

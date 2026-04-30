@@ -249,41 +249,42 @@ def autoconfigurar(token):
     return {"ok":False,"erro":err_msg}
 
 def sincronizar_impressoras():
-    """Busca impressoras atualizadas do servidor e atualiza config local"""
+    """Busca impressoras atualizadas do servidor e atualiza config local.
+    NUNCA sobrescreve mapeamento manual (nome_impressora, area, tipo) já feito pelo usuario."""
     token = cfg.get("token","")
     if not token: return
-    resp,s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll",{"action":"poll"},token)
+    payload = {"action":"poll","device_name":DEVICE_NAME,"device_fingerprint":DEVICE_FINGERPRINT}
+    resp,s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, token)
     if s==200 and resp:
         printers = resp.get("config",{}).get("printers", resp.get("printers", []))
         if not printers: return
         iw = listar_impressoras_windows()
-        # Index case-insensitive e sem espaços extras para preservar config manual
+        # Index case-insensitive para preservar TUDO que o usuario configurou manualmente
         imps_atuais = {i.get("nome","").strip().lower(): i for i in cfg.get("impressoras",[])}
         imps_novos = []
         for p in printers:
             ns = p.get("name",""); ts = p.get("printer_type","receipt")
-            area = {"receipt":"caixa","kitchen":"cozinha","bar":"bar"}.get(ts,"caixa")
+            area_servidor = {"receipt":"caixa","kitchen":"cozinha","bar":"bar"}.get(ts,"caixa")
 
-            # Preserva mapeamento manual já feito pelo usuário (busca case-insensitive)
             existente = imps_atuais.get(ns.strip().lower())
-            if existente and existente.get("nome_impressora"):
-                imps_novos.append(existente)
+            if existente:
+                # SEMPRE preserva o que o usuario configurou - apenas adiciona printer_type se faltar
+                imp = dict(existente)
+                if not imp.get("printer_type"):
+                    imp["printer_type"] = ts
+                imps_novos.append(imp)
             else:
-                # Tenta match inteligente
+                # Nova impressora do servidor - tenta match automático
                 match = ""
-                # 1. Match exato
                 if ns in iw: match = ns
-                # 2. Match parcial (ex: "CAIXA" in "EPSON CAIXA")
                 if not match:
                    match = next((x for x in iw if ns.upper() in x.upper() or x.upper() in ns.upper()), "")
-                # 3. Match primeiro nome (ex: "TP-650" em "TANCA TP-650")
                 if not match and " " in ns:
                    first = ns.split(" ")[0].upper()
                    if len(first) > 2:
                       match = next((x for x in iw if first in x.upper()), "")
+                imps_novos.append({"nome":ns,"area":area_servidor,"printer_type":ts,"nome_impressora":match,"tipo":"comum_win32","modo":"texto"})
 
-                imps_novos.append({"nome":ns,"area":area,"printer_type":ts,"nome_impressora":match,"tipo":"comum_win32","modo":"texto"})
-        
         if str(imps_novos) != str(cfg.get("impressoras",[])):
             cfg["impressoras"] = imps_novos
             salvar_config(cfg)
@@ -628,7 +629,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.2"
+CURRENT_VERSION = "5.3"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 def _baixar_e_aplicar_update(nova, url_nova):
@@ -1593,16 +1594,19 @@ def abrir_config():
     tag_ag.tag_configure("offline", foreground="#f38ba8")
     tag_ag.pack(fill="both",expand=True,padx=10,pady=4)
 
-    def _atualizar_agentes():
+    status_ag_var = tk.StringVar(value="Carregando...")
+    tk.Label(f_ag, textvariable=status_ag_var, bg="#1e1e2e", fg="#6c7086",
+             font=("Segoe UI",8)).pack(anchor="w", padx=12)
+
+    def _popular_tabela(lista):
         tag_ag.delete(*tag_ag.get_children())
         agora = time.time()
-        for ag in _agents_online:
+        import datetime
+        for ag in lista:
             nome = ag.get("device_name") or "Agente"
             areas_ag = ", ".join(ag.get("covered_areas") or []) or "todas"
             hb = ag.get("last_heartbeat_at","")
-            # Calcula segundos desde o ultimo heartbeat
             try:
-                import datetime
                 ts = datetime.datetime.fromisoformat(hb.replace("Z","+00:00"))
                 diff = agora - ts.timestamp()
                 if diff < 35:
@@ -1614,12 +1618,31 @@ def abrir_config():
                 hb_fmt = time.strftime("%H:%M:%S", time.localtime(ts.timestamp()))
             except Exception:
                 status_txt = "?"; tag = "recente"; hb_fmt = hb[:19]
-            # Marca o proprio agente
             if ag.get("device_name","") == DEVICE_NAME:
                 nome = nome + " (este)"
             tag_ag.insert("","end",values=(nome, areas_ag, status_txt, hb_fmt),tags=(tag,))
+        status_ag_var.set(f"Ultima atualizacao: {time.strftime('%H:%M:%S')}  |  {len(lista)} agente(s)")
 
+    def _atualizar_agentes():
+        status_ag_var.set("Buscando...")
+        def _fetch():
+            # Faz poll real para obter agents_online atualizado
+            imps = cfg.get("impressoras",[])
+            areas = list(set([i.get("area","").strip().lower() for i in imps if i.get("area","").strip() and i.get("nome_impressora")]))
+            payload = {"action":"poll","device_name":DEVICE_NAME,"device_fingerprint":DEVICE_FINGERPRINT}
+            if areas: payload["areas"] = areas
+            resp, s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, cfg.get("token",""))
+            if s == 200 and resp:
+                lista = resp.get("agents_online", [])
+                _root.after(0, lambda: _popular_tabela(lista))
+            else:
+                _root.after(0, lambda: status_ag_var.set(f"Erro ao buscar ({s})"))
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    # Popula imediatamente com dados já em memória, depois busca atualizado
+    _popular_tabela(_agents_online)
     _atualizar_agentes()
+
     tk.Button(f_ag,text="Atualizar",command=_atualizar_agentes,
               bg="#89b4fa",fg="#1e1e2e",font=("Segoe UI",9,"bold"),
               relief="flat",padx=12,pady=4,cursor="hand2").pack(pady=4)
@@ -1915,17 +1938,19 @@ if __name__ == "__main__":
 
     log.info(f"=== Concentrador de Impressoes e Dispositivos v{CURRENT_VERSION} iniciando ===")
 
-    # Remove exes versionados antigos (AgenteLocal_X.Y.exe) deixando apenas AgenteLocal.exe
+    # Remove exes versionados antigos em background (pode estar em uso logo apos update)
     if getattr(sys, 'frozen', False):
-        try:
+        def _cleanup_old_exes():
+            time.sleep(5)  # Aguarda processo anterior liberar o arquivo
             for f in BASE_DIR.glob("AgenteLocal_*.exe"):
-                try:
-                    f.unlink()
-                    log.info(f"[CLEANUP] Removido exe antigo: {f.name}")
-                except Exception as e:
-                    log.warning(f"[CLEANUP] Nao foi possivel remover {f.name}: {e}")
-        except Exception as e:
-            log.warning(f"[CLEANUP] {e}")
+                for _ in range(3):
+                    try:
+                        f.unlink()
+                        log.info(f"[CLEANUP] Removido exe antigo: {f.name}")
+                        break
+                    except Exception:
+                        time.sleep(3)
+        threading.Thread(target=_cleanup_old_exes, daemon=True).start()
 
     # Garante startup no Windows
     _garantir_startup()
