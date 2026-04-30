@@ -1,5 +1,5 @@
 """Agente Local v3.4 - GUI na main thread, polling em background"""
-import asyncio, json, logging, sys, time, threading, os, subprocess, winreg, queue
+import asyncio, json, logging, sys, time, threading, os, subprocess, winreg, queue, hashlib, socket
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
@@ -32,6 +32,8 @@ CONFIG_PATH  = BASE_DIR / "config.json"
 LOG_PATH     = BASE_DIR / "agente.log"
 SUPABASE_URL  = "https://szlyzyflalerxuyxfxzh.supabase.co"
 SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN6bHl6eWZsYWxlcnh1eXhmeHpoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQwMDkyNTQsImV4cCI6MjA4OTU4NTI1NH0.2UewBvzucel7wiuXv14mvgDmi_FmzCc-Zh2CISL9_VI"
+DEVICE_NAME        = socket.gethostname()
+DEVICE_FINGERPRINT = hashlib.sha256(DEVICE_NAME.encode()).hexdigest()[:32]
 
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -207,16 +209,24 @@ def _post(url, data, token, timeout=30, retries=2):
                 log.error(f"HTTP: {e}")
                 return None, 0
 
+_agents_online = []  # Atualizado a cada poll
+
 def ef_poll_jobs():
+    global _agents_online
     imps = cfg.get("impressoras", [])
     areas = list(set([i.get("area","").strip().lower() for i in imps if i.get("area","").strip() and i.get("nome_impressora")]))
-    payload = {"action": "poll"}
+    payload = {
+        "action": "poll",
+        "device_name": DEVICE_NAME,
+        "device_fingerprint": DEVICE_FINGERPRINT,
+    }
     if areas:
         payload["areas"] = areas
     log.info(f"[POLL] Enviando payload: {payload} | token: {cfg.get('token','')[:12]}...")
     resp,s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, cfg.get("token",""))
     log.info(f"[POLL] Resposta HTTP {s}: {str(resp)[:300]}")
     if s==200 and resp:
+        _agents_online = resp.get("agents_online", [])
         jobs = resp.get("print_jobs") or resp.get("jobs") or []
         if isinstance(resp, list): jobs = resp
         return jobs
@@ -618,7 +628,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.1"
+CURRENT_VERSION = "5.2"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 def _baixar_e_aplicar_update(nova, url_nova):
@@ -1568,6 +1578,51 @@ def abrir_config():
               relief="flat",padx=12,pady=6,cursor="hand2").pack(side="left",padx=4)
 
     f_sco.columnconfigure(1,weight=1)
+
+    # AGENTES ONLINE
+    f_ag=ttk.Frame(nb); nb.add(f_ag,text="Agentes")
+    tk.Label(f_ag,text="Agentes conectados ao mesmo restaurante",
+             bg="#313244",fg="#cdd6f4",font=("Segoe UI",9,"bold"),anchor="w",padx=8,pady=4
+             ).pack(fill="x",padx=10,pady=(10,2))
+    cols_ag=("maquina","areas","status","ultimo")
+    tag_ag=ttk.Treeview(f_ag,columns=cols_ag,show="headings",height=8)
+    for col,lbl,cw in [("maquina","Maquina",180),("areas","Area(s)",160),("status","Status",80),("ultimo","Ultimo heartbeat",160)]:
+        tag_ag.heading(col,text=lbl); tag_ag.column(col,width=cw,anchor="w")
+    tag_ag.tag_configure("online",  foreground="#a6e3a1")
+    tag_ag.tag_configure("recente", foreground="#f9e2af")
+    tag_ag.tag_configure("offline", foreground="#f38ba8")
+    tag_ag.pack(fill="both",expand=True,padx=10,pady=4)
+
+    def _atualizar_agentes():
+        tag_ag.delete(*tag_ag.get_children())
+        agora = time.time()
+        for ag in _agents_online:
+            nome = ag.get("device_name") or "Agente"
+            areas_ag = ", ".join(ag.get("covered_areas") or []) or "todas"
+            hb = ag.get("last_heartbeat_at","")
+            # Calcula segundos desde o ultimo heartbeat
+            try:
+                import datetime
+                ts = datetime.datetime.fromisoformat(hb.replace("Z","+00:00"))
+                diff = agora - ts.timestamp()
+                if diff < 35:
+                    status_txt = "Online"; tag = "online"
+                elif diff < 120:
+                    status_txt = "Recente"; tag = "recente"
+                else:
+                    status_txt = "Offline"; tag = "offline"
+                hb_fmt = time.strftime("%H:%M:%S", time.localtime(ts.timestamp()))
+            except Exception:
+                status_txt = "?"; tag = "recente"; hb_fmt = hb[:19]
+            # Marca o proprio agente
+            if ag.get("device_name","") == DEVICE_NAME:
+                nome = nome + " (este)"
+            tag_ag.insert("","end",values=(nome, areas_ag, status_txt, hb_fmt),tags=(tag,))
+
+    _atualizar_agentes()
+    tk.Button(f_ag,text="Atualizar",command=_atualizar_agentes,
+              bg="#89b4fa",fg="#1e1e2e",font=("Segoe UI",9,"bold"),
+              relief="flat",padx=12,pady=4,cursor="hand2").pack(pady=4)
 
     # INICIALIZACAO
     f4=ttk.Frame(nb); nb.add(f4,text="Inicializacao")

@@ -1,5 +1,5 @@
 {
-  "version": "5.1",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.1/AgenteLocal.exe",
-  "notes": "Fix update: bat usa %%P correto e PowerShell para relançar exe com caminhos com espacos"
+  "version": "5.2",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.2/AgenteLocal.exe",
+  "notes": "Multi-agente: cada PC registra suas areas no servidor, recebe somente jobs da sua impressora. Nova aba Agentes mostra quem esta online."
 }
