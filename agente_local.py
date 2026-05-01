@@ -392,28 +392,40 @@ W=48
 TL={"counter":"BALCAO","dine_in":"MESA","takeaway":"RETIRADA","delivery":"DELIVERY"}
 PL={"cash":"Dinheiro","credit":"Cartao Credito","debit":"Cartao Debito","pix":"PIX"}
 
-def _li(q,n,p):
-    pv=_R(int(q)*int(p)); b=f"{q}x {n}"; e=W-len(b)-len(pv)
-    return b+(" "*max(1,e))+pv if e>=1 else f"{b}\n{pv:>{W}}"
+def _li(q,n,p,w=None):
+    w=w or W; pv=_R(int(q)*int(p)); b=f"{q}x {n}"; e=w-len(b)-len(pv)
+    return b+(" "*max(1,e))+pv if e>=1 else f"{b}\n{pv:>{w}}"
 
 def _fmt(content, jt, pt):
-    tipo=content.get("type",jt); ll=[]; S="-"*W
+    # Largura do papel: paper_width do content tem prioridade, default 48
+    pw = content.get("paper_width")
+    w = int(pw) if pw and str(pw).isdigit() else W
+    S="-"*w
+
+    # Flags de exibição configuráveis
+    show_phone    = content.get("print_customer_info", True)
+    show_payment  = content.get("print_payment_method", True)
+
+    tipo=content.get("type",jt); ll=[]
     if tipo in ("order","receipt"):
         ne=content.get("company_name","") or cfg.get("restaurant_name","")
-        if ne: ll.append(ne.upper().center(W))
+        if ne: ll.append(ne.upper().center(w))
         e=content.get("company_address","")
-        if e: ll.append(e.center(W))
+        if e: ll.append(e.center(w))
         t=content.get("company_phone","")
-        if t: ll.append(f"Tel: {t}".center(W))
+        if t: ll.append(f"Tel: {t}".center(w))
         ll.append(S)
         n=content.get("order_number","")
-        if n: ll.append(f"PEDIDO #{n}".center(W))
+        if n: ll.append(f"PEDIDO #{n}".center(w))
         tp=content.get("order_type","")
-        if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(W))
+        if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
         c2=content.get("customer_name","")
         if c2: ll.append(f"Cliente: {c2}")
         m=content.get("table_number","")
         if m: ll.append(f"Mesa: {m}")
+        # Telefone do cliente (controlado por print_customer_info)
+        ph=content.get("customer_phone","")
+        if ph and show_phone: ll.append(f"Tel: {ph}")
         try:
             from datetime import datetime
             dt=content.get("created_at","")
@@ -421,7 +433,7 @@ def _fmt(content, jt, pt):
         except: pass
         ll.append(S)
         for item in content.get("items",[]):
-            ll.append(_li(item.get("quantity",1),item.get("name",""),item.get("unit_price_cents",0)))
+            ll.append(_li(item.get("quantity",1),item.get("name",""),item.get("unit_price_cents",0),w))
             obs=item.get("notes","")
             if obs: ll.append(f"  Obs: {obs}")
             for a in item.get("addons",[]):
@@ -431,27 +443,40 @@ def _fmt(content, jt, pt):
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         ent=content.get("delivery_fee_cents",0); tot=content.get("total_cents",0)
         if sub:
-            sv=_R(sub); ll.append(f"{'Subtotal:':<{W-len(sv)}}{sv}")
+            sv=_R(sub); ll.append(f"{'Subtotal:':<{w-len(sv)}}{sv}")
         if desc and int(desc)>0:
-            dv=f"-{_R(desc)}"; ll.append(f"{'Desconto:':<{W-len(dv)}}{dv}")
+            dv=f"-{_R(desc)}"; ll.append(f"{'Desconto:':<{w-len(dv)}}{dv}")
         if ent and int(ent)>0:
-            ev=_R(ent); ll.append(f"{'Taxa entrega:':<{W-len(ev)}}{ev}")
-        tv=_R(tot); ll.append(f"{'TOTAL:':<{W-len(tv)}}{tv}")
+            ev=_R(ent); ll.append(f"{'Taxa entrega:':<{w-len(ev)}}{ev}")
+        tv=_R(tot); ll.append(f"{'TOTAL:':<{w-len(tv)}}{tv}")
         pg=content.get("payment_method","")
-        if pg: ll.append(f"Pagamento: {PL.get(pg,pg)}")
+        if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg,pg)}")
         cod=content.get("pickup_code","")
-        if cod: ll.append("="*W); ll.append(f"RETIRADA: {cod}".center(W)); ll.append("="*W)
+        if cod: ll.append("="*w); ll.append(f"RETIRADA: {cod}".center(w)); ll.append("="*w)
         obs2=content.get("notes","")
         if obs2: ll.append(S); ll.append(f"Obs: {obs2}")
+        # Endereço de entrega (delivery)
+        addr=content.get("delivery_address","") or content.get("delivery_address_street","")
+        if addr:
+            ll.append(S); ll.append("ENTREGA:".center(w))
+            ll.append(addr)
+            comp=content.get("delivery_address_complement","")
+            if comp: ll.append(comp)
+            bairro=content.get("delivery_address_neighborhood","") or content.get("delivery_address_district","")
+            if bairro: ll.append(bairro)
+            city=content.get("delivery_address_city","")
+            ref=content.get("delivery_address_reference","")
+            if city: ll.append(city)
+            if ref: ll.append(f"Ref: {ref}")
         rod=content.get("footer_message","")
-        if rod: ll.append(S); ll.append(rod.center(W))
+        if rod: ll.append(S); ll.append(rod.center(w))
         ll.append(S)
     elif tipo=="kitchen":
-        ll+=["*"*W,"COZINHA".center(W),"*"*W]
+        ll+=["*"*w,"COZINHA".center(w),"*"*w]
         n=content.get("order_number","")
-        if n: ll.append(f"PEDIDO #{n}".center(W))
+        if n: ll.append(f"PEDIDO #{n}".center(w))
         tp=content.get("order_type","")
-        if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(W))
+        if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
         m=content.get("table_number","")
         if m: ll.append(f"Mesa: {m}")
         c2=content.get("customer_name","")
@@ -471,9 +496,9 @@ def _fmt(content, jt, pt):
         if obs2: ll.append(S); ll.append(f"OBS: {obs2}")
         ll.append(S)
     elif tipo=="bar":
-        ll+=["*"*W,"BAR".center(W),"*"*W]
+        ll+=["*"*w,"BAR".center(w),"*"*w]
         n=content.get("order_number","")
-        if n: ll.append(f"PEDIDO #{n}".center(W))
+        if n: ll.append(f"PEDIDO #{n}".center(w))
         m=content.get("table_number","")
         if m: ll.append(f"Mesa: {m}")
         ll.append(S)
@@ -484,19 +509,19 @@ def _fmt(content, jt, pt):
         ll.append(S)
     elif tipo=="pickup":
         ne=cfg.get("restaurant_name","")
-        if ne: ll.append(ne.upper().center(W))
-        ll.append("*** RETIRADA ***".center(W))
+        if ne: ll.append(ne.upper().center(w))
+        ll.append("*** RETIRADA ***".center(w))
         cod=content.get("pickup_code","")
-        if cod: ll.append(f"CODIGO: {cod}".center(W))
+        if cod: ll.append(f"CODIGO: {cod}".center(w))
         c2=content.get("customer_name","")
         if c2: ll.append(f"Cliente: {c2}")
         ll.append(f"Total: {_R(content.get('total_cents',0))}"); ll.append(S)
     elif tipo=="delivery":
         ne=content.get("company_name","") or cfg.get("restaurant_name","")
-        if ne: ll.append(ne.upper().center(W))
-        ll.append("*** ENTREGA ***".center(W)); ll.append(S)
+        if ne: ll.append(ne.upper().center(w))
+        ll.append("*** ENTREGA ***".center(w)); ll.append(S)
         n=content.get("order_number","")
-        if n: ll.append(f"PEDIDO #{n}".center(W))
+        if n: ll.append(f"PEDIDO #{n}".center(w))
         c2=content.get("customer_name","")
         if c2: ll.append(f"Cliente: {c2}")
         t2=content.get("customer_phone","")
@@ -505,14 +530,26 @@ def _fmt(content, jt, pt):
         for item in content.get("items",[]): ll.append(f"  {item.get('quantity',1)}x  {item.get('name','')}")
         ll.append(S); tv=_R(content.get("total_cents",0)); ll.append(f"TOTAL: {tv}")
         pg=content.get("payment_method","")
-        if pg: ll.append(f"Pagamento: {PL.get(pg,pg)}")
+        if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg,pg)}")
+        # Endereço de entrega
+        addr=content.get("delivery_address","") or content.get("delivery_address_street","")
+        if addr:
+            ll.append(S); ll.append("ENDERECO:".center(w)); ll.append(addr)
+            comp=content.get("delivery_address_complement","")
+            if comp: ll.append(comp)
+            bairro=content.get("delivery_address_neighborhood","") or content.get("delivery_address_district","")
+            if bairro: ll.append(bairro)
+            city=content.get("delivery_address_city","")
+            ref=content.get("delivery_address_reference","")
+            if city: ll.append(city)
+            if ref: ll.append(f"Ref: {ref}")
         ll.append(S)
     elif tipo=="command":
         if content.get("command")=="open_drawer": return "\x1b\x70\x00\x19\xfa"
     elif tipo=="test_page":
-        ll+=["="*W,"   AGENTE LOCAL - TESTE OK!   ".center(W),"="*W,
+        ll+=["="*w,"   AGENTE LOCAL - TESTE OK!   ".center(w),"="*w,
              content.get("title","Teste"),content.get("message",""),
-             f"Hora: {time.strftime('%d/%m/%Y %H:%M:%S')}","="*W]
+             f"Hora: {time.strftime('%d/%m/%Y %H:%M:%S')}","="*w]
     else:
         ll.append(f"JOB: {tipo}"); ll.append(json.dumps(content,ensure_ascii=False)[:200])
     return "\n".join(ll)
@@ -533,7 +570,10 @@ def proc_job(job):
     content=job.get("content",{}); copies=int(job.get("copies",1)); jt=job.get("job_type","order")
     log.info(f"[PRINT] Job {jid} tipo={pt}")
     oid=content.get("order_id")
-    if oid and len(content)<=3:
+    # Busca pedido completo apenas se o content chegou vazio (só com order_id/type/auto_print)
+    # Se já tem items ou campos de layout (paper_width, receipt_font_size, etc.) usa direto
+    _content_rico = "items" in content or "paper_width" in content or "receipt_font_size" in content or "company_name" in content
+    if oid and not _content_rico:
         p=ef_get_order(oid)
         if p:
             content=p
@@ -629,7 +669,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.5"
+CURRENT_VERSION = "5.6"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

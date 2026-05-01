@@ -1,5 +1,5 @@
 {
-  "version": "5.5",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.5/AgenteLocal.exe",
-  "notes": "v5.5: Corrige multiplas instancias - flag de update unico, bat verifica se ja existe processo antes de lancar."
+  "version": "5.6",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.6/AgenteLocal.exe",
+  "notes": "v5.6: Cupom personalizavel - paper_width, print_customer_info, print_payment_method, endereco de entrega, telefone do cliente. Nao busca pedido do servidor quando content ja vem completo."
 }
