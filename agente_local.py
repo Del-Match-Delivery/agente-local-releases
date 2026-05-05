@@ -688,7 +688,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.7"
+CURRENT_VERSION = "5.8"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1692,24 +1692,36 @@ def abrir_config():
         status_ag_var.set(f"Ultima atualizacao: {time.strftime('%H:%M:%S')}  |  {len(lista)} agente(s)")
 
     def _atualizar_agentes():
+        if not w.winfo_exists(): return
         status_ag_var.set("Buscando...")
         def _fetch():
-            # Faz poll real para obter agents_online atualizado
-            imps = cfg.get("impressoras",[])
-            areas = list(set([i.get("area","").strip().lower() for i in imps if i.get("area","").strip() and i.get("nome_impressora")]))
-            payload = {"action":"poll","device_name":DEVICE_NAME,"device_fingerprint":DEVICE_FINGERPRINT}
-            if areas: payload["areas"] = areas
-            resp, s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, cfg.get("token",""))
-            if s == 200 and resp:
-                lista = resp.get("agents_online", [])
-                _root.after(0, lambda: _popular_tabela(lista))
-            else:
-                _root.after(0, lambda: status_ag_var.set(f"Erro ao buscar ({s})"))
+            try:
+                imps = cfg.get("impressoras",[])
+                areas = list(set([i.get("area","").strip().lower() for i in imps if i.get("area","").strip() and i.get("nome_impressora")]))
+                payload = {"action":"poll","device_name":DEVICE_NAME,"device_fingerprint":DEVICE_FINGERPRINT}
+                if areas: payload["areas"] = areas
+                resp, s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, cfg.get("token",""))
+                if s == 200 and resp:
+                    lista = resp.get("agents_online", [])
+                    if not w.winfo_exists(): return
+                    _root.after(0, lambda: _popular_tabela(lista))
+                else:
+                    erro = resp.get("error","") if isinstance(resp,dict) else str(resp)[:80]
+                    if not w.winfo_exists(): return
+                    _root.after(0, lambda: status_ag_var.set(f"Erro {s}: {erro}"))
+            except Exception as ex:
+                if not w.winfo_exists(): return
+                _root.after(0, lambda: status_ag_var.set(f"Excecao: {ex}"))
         threading.Thread(target=_fetch, daemon=True).start()
 
-    # Popula imediatamente com dados já em memória, depois busca atualizado
+    def _auto_refresh_agentes():
+        if not w.winfo_exists(): return
+        _atualizar_agentes()
+        w.after(15000, _auto_refresh_agentes)
+
+    # Popula imediatamente com dados já em memória, depois inicia refresh automático
     _popular_tabela(_agents_online)
-    _atualizar_agentes()
+    w.after(100, _auto_refresh_agentes)
 
     tk.Button(f_ag,text="Atualizar",command=_atualizar_agentes,
               bg="#89b4fa",fg="#1e1e2e",font=("Segoe UI",9,"bold"),

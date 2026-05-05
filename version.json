@@ -1,5 +1,5 @@
 {
-  "version": "5.7",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.7/AgenteLocal.exe",
-  "notes": "v5.7: Corrige impressao no lugar errado - agente descarta jobs que nao sao do seu tipo, sem fallback para impressora errada."
+  "version": "5.8",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.8/AgenteLocal.exe",
+  "notes": "v5.8: Aba Agentes: refresh automatico a cada 15s, exibe erro detalhado se poll falhar."
 }
