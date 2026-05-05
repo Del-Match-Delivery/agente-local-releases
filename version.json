@@ -1,5 +1,5 @@
 {
-  "version": "5.9",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.9/AgenteLocal.exe",
-  "notes": "v5.9: Instancia unica garantida - mata processos duplicados pelo PID no startup, mutex handle mantido em variavel global para evitar GC."
+  "version": "5.10",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.10/AgenteLocal.exe",
+  "notes": "v5.10: Corrige reiniciar - usa AgenteLocal.exe da pasta real em vez de sys.executable (pasta temp do PyInstaller)."
 }

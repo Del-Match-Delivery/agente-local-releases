@@ -688,7 +688,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.9"
+CURRENT_VERSION = "5.10"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1856,16 +1856,22 @@ def abrir_config():
 
 def reiniciar_app():
     log.info("Reiniciando agente...")
-    exe = sys.executable
+    # Sempre usa AgenteLocal.exe na pasta do executavel, nunca sys.executable
+    # (sys.executable no PyInstaller aponta para pasta temp _MEH* que some apos exit)
+    if getattr(sys, 'frozen', False):
+        exe = str(BASE_DIR / "AgenteLocal.exe")
+    else:
+        exe = sys.executable
     bat = BASE_DIR / "restart.bat"
     bat.write_text(
         "@echo off\r\n"
         "timeout /t 2 /nobreak >nul\r\n"
-        f'start \"\" \"{exe}\"\r\n'
-        'del \"%~f0\"\r\n',
+        f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe}\'"\r\n'
+        'del "%~f0"\r\n',
         encoding="utf-8"
     )
-    subprocess.Popen(["cmd", "/c", str(bat)], creationflags=subprocess.CREATE_NO_WINDOW)
+    subprocess.Popen(["cmd", "/c", str(bat)],
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
     os._exit(0)
 
 
