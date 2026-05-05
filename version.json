@@ -1,5 +1,5 @@
 {
-  "version": "5.6",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.6/AgenteLocal.exe",
-  "notes": "v5.6: Cupom personalizavel - paper_width, print_customer_info, print_payment_method, endereco de entrega, telefone do cliente. Nao busca pedido do servidor quando content ja vem completo."
+  "version": "5.7",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.7/AgenteLocal.exe",
+  "notes": "v5.7: Corrige impressao no lugar errado - agente descarta jobs que nao sao do seu tipo, sem fallback para impressora errada."
 }

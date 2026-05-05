@@ -556,18 +556,37 @@ def _fmt(content, jt, pt):
 
 def _res_imp(pt):
     imps=cfg.get("impressoras",[])
-    areas={"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"]}.get(pt,["caixa"])
+    areas={"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"]}.get(pt,[pt])
     for i in imps:
         if i.get("area","").strip().lower() in areas or i.get("printer_type")==pt:
             n=i.get("nome_impressora","")
             if n: return n
-    if imps: return imps[0].get("nome_impressora","")
+    # Sem fallback — nao imprime no lugar errado se nao tem impressora para este tipo
     return ""
+
+def _agente_cobre_tipo(pt):
+    """Retorna True se este agente tem impressora configurada para o printer_type pt."""
+    imps = cfg.get("impressoras", [])
+    if not imps:
+        return True  # sem config, aceita tudo (modo legado)
+    areas_mapa = {"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"],"delivery":["delivery"],"pickup":["balcao","pickup"]}
+    areas_pt = areas_mapa.get(pt, [pt])
+    for i in imps:
+        area = i.get("area","").strip().lower()
+        ptype = i.get("printer_type","")
+        if area in areas_pt or ptype == pt:
+            if i.get("nome_impressora",""):
+                return True
+    return False
 
 def proc_job(job):
     jid=job.get("id"); pt=job.get("printer_type","receipt")
     pid=job.get("printer_id")
     content=job.get("content",{}); copies=int(job.get("copies",1)); jt=job.get("job_type","order")
+    # Descarta jobs que nao sao deste agente (segurança extra caso servidor mande job errado)
+    if not _agente_cobre_tipo(pt):
+        log.info(f"[PRINT] Job {jid} tipo={pt} ignorado (este agente nao tem impressora para esse tipo)")
+        return
     log.info(f"[PRINT] Job {jid} tipo={pt}")
     oid=content.get("order_id")
     # Busca pedido completo apenas se o content chegou vazio (só com order_id/type/auto_print)
@@ -669,7 +688,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.6"
+CURRENT_VERSION = "5.7"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
