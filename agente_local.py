@@ -198,6 +198,13 @@ def iniciar_tray():
     _tray_icon = pystray.Icon("AgenteLocal", _criar_icone((239,68,68)), "Agente Local", menu)
     threading.Thread(target=_tray_icon.run, daemon=True).start()
 
+def _ssl_ctx():
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
 def _post(url, data, token, timeout=30, retries=2):
     body = json.dumps(data).encode()
     headers = {
@@ -209,7 +216,7 @@ def _post(url, data, token, timeout=30, retries=2):
     for tentativa in range(retries + 1):
         req = urllib.request.Request(url, data=body, method="POST", headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as r:
                 return json.loads(r.read()), r.status
         except urllib.error.HTTPError as e:
             try: return json.loads(e.read()), e.code
@@ -223,9 +230,10 @@ def _post(url, data, token, timeout=30, retries=2):
                 return None, 0
 
 _agents_online = []  # Atualizado a cada poll
+_token_invalido = False  # Evita abrir configuracoes multiplas vezes
 
 def ef_poll_jobs():
-    global _agents_online
+    global _agents_online, _token_invalido
     imps = cfg.get("impressoras", [])
     areas = list(set([i.get("area","").strip().lower() for i in imps if i.get("area","").strip() and i.get("nome_impressora")]))
     payload = {
@@ -237,13 +245,22 @@ def ef_poll_jobs():
         payload["areas"] = areas
     log.info(f"[POLL] Enviando payload: {payload} | token: {cfg.get('token','')[:12]}...")
     resp,s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, cfg.get("token",""))
-    log.info(f"[POLL] Resposta HTTP {s}: {str(resp)[:300]}")
     if s==200 and resp:
+        _token_invalido = False
         _agents_online = resp.get("agents_online", [])
+        log.info(f"[POLL] Resposta HTTP {s}: {str(resp)[:300]}")
         jobs = resp.get("print_jobs") or resp.get("jobs") or []
         if isinstance(resp, list): jobs = resp
         return jobs
-    if s!=200: log.error(f"[POLL] {s}: {resp}")
+    if s == 401:
+        if not _token_invalido:
+            _token_invalido = True
+            log.error(f"[POLL] Token invalido (401) - abrindo configuracoes")
+            if _root:
+                _root.after(0, abrir_config)
+        # Nao loga a cada 3s para nao encher o log
+    else:
+        log.error(f"[POLL] {s}: {resp}")
     return []
 
 def ef_update_job(jid, sv, em=None, pa=None):
@@ -701,7 +718,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.11"
+CURRENT_VERSION = "5.12"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -737,7 +754,7 @@ def _baixar_e_aplicar_update(nova, url_nova):
         exe_novo = BASE_DIR / f"AgenteLocal_{nova}.exe"
         log.info(f"[UPDATE] Baixando v{nova}...")
         req = urllib.request.Request(url_nova)
-        with urllib.request.urlopen(req, timeout=120) as r, open(exe_novo, "wb") as f:
+        with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as r, open(exe_novo, "wb") as f:
             while True:
                 chunk = r.read(65536)
                 if not chunk:
@@ -768,7 +785,7 @@ async def checar_atualizacao():
         return
     try:
         req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx()) as r:
             info = json.loads(r.read())
         nova = info.get("version", "")
         url_nova = info.get("url", "")
@@ -1008,7 +1025,7 @@ def abrir_dashboard():
         def _run():
             try:
                 req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
-                with urllib.request.urlopen(req, timeout=10) as r:
+                with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx()) as r:
                     info = json.loads(r.read())
                 nova = info.get("version", "")
                 url_nova = info.get("url", "")
@@ -1901,9 +1918,9 @@ def verificar_atualizacao():
         if GITHUB_TOKEN:
             req.add_header("Authorization", f"token {GITHUB_TOKEN}")
         
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx()) as r:
             data = json.loads(r.read())
-        
+
         nova = data.get("version","")
         if nova and nova != VERSION:
             log.info(f"[UPDATE] Nova versao disponivel: {nova} (atual: {VERSION})")

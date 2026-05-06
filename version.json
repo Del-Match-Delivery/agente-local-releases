@@ -1,5 +1,5 @@
 {
-  "version": "5.11",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.11/AgenteLocal.exe",
-  "notes": "v5.11: Corrige inicializacao no Windows - registro Run com aspas para caminhos com espacos, remove atalhos antigos da pasta Startup."
+  "version": "5.12",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.12/AgenteLocal.exe",
+  "notes": "v5.12: Corrige SSL certificate error no update automatico, evita loop de 401 abrindo configuracoes uma vez."
 }
