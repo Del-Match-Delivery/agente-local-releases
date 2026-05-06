@@ -105,7 +105,6 @@ def _atualizar_icone():
 def _garantir_startup():
     """Garante que registro e atalho de startup sempre apontam para AgenteLocal.exe"""
     try:
-        # Resolve o exe canonico (sempre AgenteLocal.exe na pasta dist)
         if getattr(sys, 'frozen', False):
             exe = str(BASE_DIR / "AgenteLocal.exe")
             if not Path(exe).exists():
@@ -117,41 +116,55 @@ def _garantir_startup():
             log.warning(f"[STARTUP] exe nao encontrado: {exe}")
             return
 
-        # Corrige registro HKCU Run (sempre sobrescreve se diferente)
+        # Valor do registro SEMPRE com aspas para suportar caminhos com espacos
+        reg_val = f'"{exe}"'
+
+        # Corrige registro HKCU Run
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                  r"Software\Microsoft\Windows\CurrentVersion\Run",
                                  0, winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE)
             try:
                 val, _ = winreg.QueryValueEx(key, "AgenteLocal")
-                if val != exe:
-                    winreg.SetValueEx(key, "AgenteLocal", 0, winreg.REG_SZ, exe)
-                    log.info(f"[STARTUP] Registro corrigido: {val} -> {exe}")
+                # Aceita com ou sem aspas no valor existente
+                if val.strip('"') != exe:
+                    winreg.SetValueEx(key, "AgenteLocal", 0, winreg.REG_SZ, reg_val)
+                    log.info(f"[STARTUP] Registro corrigido: {val} -> {reg_val}")
                 else:
-                    log.info(f"[STARTUP] Registro OK: {exe}")
+                    log.info(f"[STARTUP] Registro OK: {reg_val}")
             except FileNotFoundError:
-                winreg.SetValueEx(key, "AgenteLocal", 0, winreg.REG_SZ, exe)
-                log.info(f"[STARTUP] Registro criado: {exe}")
+                winreg.SetValueEx(key, "AgenteLocal", 0, winreg.REG_SZ, reg_val)
+                log.info(f"[STARTUP] Registro criado: {reg_val}")
             winreg.CloseKey(key)
         except Exception as e:
             log.warning(f"[STARTUP] Registro falhou: {e}")
 
-        # Corrige atalho .lnk na pasta Startup (sempre recria se TargetPath diferente)
+        # Corrige atalho .lnk na pasta Startup
         try:
             startup_folder = Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
             if startup_folder.exists():
                 lnk_path = startup_folder / "AgenteLocal MIA.lnk"
-                # Verifica se o atalho existente ja aponta para o exe correto
+
+                # Remove atalhos antigos com outros nomes que possam existir
+                for lnk_antigo in startup_folder.glob("AgenteLocal*.lnk"):
+                    if lnk_antigo != lnk_path:
+                        try:
+                            lnk_antigo.unlink()
+                            log.info(f"[STARTUP] Atalho antigo removido: {lnk_antigo.name}")
+                        except Exception:
+                            pass
+
+                # Verifica se o atalho correto ja aponta para o exe certo
                 precisa_recriar = True
                 if lnk_path.exists():
                     try:
                         check_ps = f'$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut("{lnk_path}"); Write-Output $s.TargetPath'
                         r = subprocess.run(["powershell", "-NoProfile", "-Command", check_ps],
                                            capture_output=True, text=True, timeout=5)
-                        target_atual = r.stdout.strip()
+                        target_atual = r.stdout.strip().strip('"')
                         if target_atual.lower() == exe.lower():
                             precisa_recriar = False
-                            log.info(f"[STARTUP] Atalho Startup OK: {lnk_path}")
+                            log.info(f"[STARTUP] Atalho OK: {lnk_path}")
                     except Exception:
                         pass
 
@@ -164,7 +177,7 @@ def _garantir_startup():
                           f'$s.Save()')
                     subprocess.run(["powershell", "-NoProfile", "-Command", ps],
                                    capture_output=True, timeout=10)
-                    log.info(f"[STARTUP] Atalho Startup corrigido -> {exe}")
+                    log.info(f"[STARTUP] Atalho criado/corrigido -> {exe}")
         except Exception as e:
             log.warning(f"[STARTUP] Atalho falhou: {e}")
 
@@ -688,7 +701,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.10"
+CURRENT_VERSION = "5.11"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

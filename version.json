@@ -1,5 +1,5 @@
 {
-  "version": "5.10",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.10/AgenteLocal.exe",
-  "notes": "v5.10: Corrige reiniciar - usa AgenteLocal.exe da pasta real em vez de sys.executable (pasta temp do PyInstaller)."
+  "version": "5.11",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.11/AgenteLocal.exe",
+  "notes": "v5.11: Corrige inicializacao no Windows - registro Run com aspas para caminhos com espacos, remove atalhos antigos da pasta Startup."
 }
