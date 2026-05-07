@@ -1,5 +1,5 @@
 {
-  "version": "5.16",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.16/AgenteLocal.exe",
-  "notes": "v5.16: Corrige bat de update - mata processos pelo nome exato e via WMIC por PID, garante substituicao do exe."
+  "version": "5.17",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.17/AgenteLocal.exe",
+  "notes": "v5.17: Corrige loop infinito de update - lock file impede multiplos bats concorrentes, limite de 10 tentativas no move, relanca exe em caso de falha."
 }

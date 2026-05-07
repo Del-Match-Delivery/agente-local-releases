@@ -725,7 +725,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.16"
+CURRENT_VERSION = "5.17"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -733,26 +733,36 @@ _update_em_andamento = False  # evita multiplos downloads simultaneos
 def _bat_update(exe_novo: Path, exe_destino: Path, del_extra: str = "") -> str:
     """Gera conteudo do bat de update. Mata processos, move com retry, lanca nova versao."""
     exe_destino_nome = exe_destino.name
-    exe_novo_nome = exe_novo.name
+    lock = exe_novo.parent / "update_lock.tmp"
     return (
         "@echo off\r\n"
-        # Mata pelo nome exato do exe destino e do exe novo (nomes conhecidos)
+        # Sai imediatamente se outro bat de update ja esta rodando
+        f'if exist "{lock}" exit /b 0\r\n'
+        f'echo 1>"{lock}"\r\n'
+        # Mata todos os processos AgenteLocal pelo nome exato e versoes antigas via WMIC
         f'taskkill /F /IM "{exe_destino_nome}" >nul 2>&1\r\n'
-        f'taskkill /F /IM "{exe_novo_nome}" >nul 2>&1\r\n'
-        # Mata qualquer outro AgenteLocal via WMIC (cobre versoes antigas)
         "for /f \"skip=1 tokens=2 delims=,\" %%P in ('wmic process where \"name like 'AgenteLocal%%'\" get processid /format:csv 2^>nul') do taskkill /F /PID %%P >nul 2>&1\r\n"
         # Espera processo liberar o arquivo
         "timeout /t 5 /nobreak >nul\r\n"
-        # Move com retry ate ter sucesso
+        # Move com retry (max 10 tentativas = 30s)
+        "set /a TRIES=0\r\n"
         ":retry\r\n"
         f'move /y "{exe_novo}" "{exe_destino}" >nul 2>&1\r\n'
         "if errorlevel 1 (\r\n"
+        "  set /a TRIES+=1\r\n"
+        "  if %TRIES% GEQ 10 goto :fail\r\n"
         "  timeout /t 3 /nobreak >nul\r\n"
         "  goto retry\r\n"
         ")\r\n"
         + del_extra +
         # Lanca nova versao
         f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe_destino}\'"\r\n'
+        "goto :end\r\n"
+        ":fail\r\n"
+        # Move falhou: relanca o exe destino atual sem update
+        f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe_destino}\'"\r\n'
+        ":end\r\n"
+        f'del /f /q "{lock}" >nul 2>&1\r\n'
         'del "%~f0"\r\n'
     )
 
