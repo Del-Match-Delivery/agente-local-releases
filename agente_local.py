@@ -235,7 +235,9 @@ _token_invalido = False  # Evita abrir configuracoes multiplas vezes
 def ef_poll_jobs():
     global _agents_online, _token_invalido
     imps = cfg.get("impressoras", [])
-    areas = list(set([i.get("area","").strip().lower() for i in imps if i.get("area","").strip() and i.get("nome_impressora")]))
+    # Inclui areas de todas as impressoras configuradas (mesmo sem nome mapeado)
+    # para garantir que o servidor mande os jobs. O erro de "sem nome" e tratado em proc_job.
+    areas = list(set([i.get("area","").strip().lower() for i in imps if i.get("area","").strip()]))
     payload = {
         "action": "poll",
         "device_name": DEVICE_NAME,
@@ -243,7 +245,7 @@ def ef_poll_jobs():
     }
     if areas:
         payload["areas"] = areas
-    log.info(f"[POLL] Enviando payload: {payload} | token: {cfg.get('token','')[:12]}...")
+    log.info(f"[POLL] Enviando areas={areas} | token: {cfg.get('token','')[:12]}...")
     resp,s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, cfg.get("token",""))
     if s==200 and resp:
         _token_invalido = False
@@ -638,15 +640,27 @@ def _agente_cobre_tipo(pt):
         if area in areas_pt or ptype == pt:
             if i.get("nome_impressora",""):
                 return True
+            else:
+                log.warning(f"[PRINT] Impressora '{i.get('nome','')}' tipo={pt} area={area} nao tem nome_impressora mapeado!")
     return False
 
 def proc_job(job):
     jid=job.get("id"); pt=job.get("printer_type","receipt")
     pid=job.get("printer_id")
     content=job.get("content",{}); copies=int(job.get("copies",1)); jt=job.get("job_type","order")
-    # Descarta jobs que nao sao deste agente (segurança extra caso servidor mande job errado)
+    # Se agente nao tem impressora para este tipo, marca failed no servidor para nao ficar em loop
     if not _agente_cobre_tipo(pt):
-        log.info(f"[PRINT] Job {jid} tipo={pt} ignorado (este agente nao tem impressora para esse tipo)")
+        imps = cfg.get("impressoras", [])
+        areas_mapa = {"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"],"delivery":["delivery"],"pickup":["balcao","pickup"]}
+        areas_pt = areas_mapa.get(pt, [pt])
+        # Verifica se tem impressora sem nome mapeado (config incompleta) vs nao e agente deste tipo
+        tem_area = any((i.get("area","").strip().lower() in areas_pt or i.get("printer_type","") == pt) for i in imps)
+        if tem_area:
+            # Impressora existe na config mas nome_impressora esta vazio - marca failed para parar o loop
+            log.error(f"[PRINT] Job {jid} tipo={pt}: impressora sem nome_impressora mapeado - configure na aba Impressoras!")
+            ef_update_job(jid, "failed", f"Impressora '{pt}' sem mapeamento Windows - configure na aba Impressoras")
+        else:
+            log.info(f"[PRINT] Job {jid} tipo={pt} ignorado (este agente nao tem impressora para esse tipo)")
         return
     log.info(f"[PRINT] Job {jid} tipo={pt}")
     oid=content.get("order_id")
@@ -749,7 +763,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.23"
+CURRENT_VERSION = "5.24"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

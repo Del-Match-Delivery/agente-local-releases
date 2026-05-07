@@ -1,5 +1,5 @@
 {
-  "version": "5.23",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.23/AgenteLocal.exe",
-  "notes": "v5.23: Corrige reimpressao de jobs da cozinha - usa impressora do historico como fallback quando o agente nao tem a impressora do tipo solicitado."
+  "version": "5.24",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.24/AgenteLocal.exe",
+  "notes": "v5.24: Corrige pedidos nao chegando - areas enviadas ao servidor mesmo sem impressora mapeada; impressora sem nome_impressora gera erro claro ao inves de ignorar jobs silenciosamente."
 }
