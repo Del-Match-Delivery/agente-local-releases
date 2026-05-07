@@ -1,5 +1,5 @@
 {
-  "version": "5.15",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.15/AgenteLocal.exe",
-  "notes": "v5.15: Corrige bat de update - usa taskkill /IM wildcard para matar todos os processos AgenteLocal antes de substituir o exe."
+  "version": "5.16",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.16/AgenteLocal.exe",
+  "notes": "v5.16: Corrige bat de update - mata processos pelo nome exato e via WMIC por PID, garante substituicao do exe."
 }

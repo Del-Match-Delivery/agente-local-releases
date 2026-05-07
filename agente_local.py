@@ -725,20 +725,25 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.15"
+CURRENT_VERSION = "5.16"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
 
 def _bat_update(exe_novo: Path, exe_destino: Path, del_extra: str = "") -> str:
     """Gera conteudo do bat de update. Mata processos, move com retry, lanca nova versao."""
+    exe_destino_nome = exe_destino.name
+    exe_novo_nome = exe_novo.name
     return (
         "@echo off\r\n"
-        # Mata todos os processos AgenteLocal pelo nome (wildcard)
-        "taskkill /F /IM \"AgenteLocal*.exe\" >nul 2>&1\r\n"
+        # Mata pelo nome exato do exe destino e do exe novo (nomes conhecidos)
+        f'taskkill /F /IM "{exe_destino_nome}" >nul 2>&1\r\n'
+        f'taskkill /F /IM "{exe_novo_nome}" >nul 2>&1\r\n'
+        # Mata qualquer outro AgenteLocal via WMIC (cobre versoes antigas)
+        "for /f \"skip=1 tokens=2 delims=,\" %%P in ('wmic process where \"name like 'AgenteLocal%%'\" get processid /format:csv 2^>nul') do taskkill /F /PID %%P >nul 2>&1\r\n"
         # Espera processo liberar o arquivo
         "timeout /t 5 /nobreak >nul\r\n"
-        # Move com retry ate ter sucesso (sem limite de tentativas)
+        # Move com retry ate ter sucesso
         ":retry\r\n"
         f'move /y "{exe_novo}" "{exe_destino}" >nul 2>&1\r\n'
         "if errorlevel 1 (\r\n"
