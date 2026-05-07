@@ -298,10 +298,11 @@ def sincronizar_impressoras():
 
             existente = imps_atuais.get(ns.strip().lower())
             if existente:
-                # SEMPRE preserva o que o usuario configurou - apenas adiciona printer_type se faltar
+                # Preserva nome_impressora e modo configurados pelo usuario
+                # Mas SEMPRE corrige area e printer_type pelo servidor (fonte de verdade)
                 imp = dict(existente)
-                if not imp.get("printer_type"):
-                    imp["printer_type"] = ts
+                imp["area"] = area_servidor
+                imp["printer_type"] = ts
                 imps_novos.append(imp)
             else:
                 # Nova impressora do servidor - tenta match automático
@@ -748,7 +749,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.21"
+CURRENT_VERSION = "5.22"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -947,11 +948,15 @@ def abrir_boasvindas():
                         "ultima_sincronizacao": time.strftime("%d/%m/%Y %H:%M:%S")})
             printers = d.get("config",{}).get("printers", d.get("printers", []))
             iw = listar_impressoras_windows()
+            imps_existentes2 = {i.get("nome","").strip().lower():i for i in cfg.get("impressoras",[])}
             imps = []
             for p in printers:
                 ns = p.get("name",""); ts = p.get("printer_type","receipt")
                 area = {"receipt":"caixa","kitchen":"cozinha","bar":"bar"}.get(ts,"caixa")
-                match = next((x for x in iw if ns.upper()[:5] in x.upper() or x.upper()[:5] in ns.upper()),"")
+                existente2 = imps_existentes2.get(ns.strip().lower())
+                match = existente2.get("nome_impressora","") if existente2 else ""
+                if not match:
+                    match = next((x for x in iw if ns.upper()[:5] in x.upper() or x.upper()[:5] in ns.upper()),"")
                 imps.append({"nome":ns,"area":area,"printer_type":ts,"nome_impressora":match,"tipo":"comum_win32","modo":"texto"})
             cfg["impressoras"] = imps
             salvar_config(cfg)
@@ -1266,10 +1271,14 @@ def abrir_config():
                         "restaurant_name":d.get("restaurant_name",""),
                         "ultima_sincronizacao":time.strftime("%d/%m/%Y %H:%M:%S")})
             printers=d.get("config",{}).get("printers", d.get("printers",[])); icfg=[]
+            imps_existentes={i.get("nome","").strip().lower():i for i in cfg.get("impressoras",[])}
             for p in printers:
                 ns=p.get("name",""); ts=p.get("printer_type","receipt")
                 area={"receipt":"caixa","kitchen":"cozinha","bar":"bar"}.get(ts,"caixa")
-                match=next((x for x in iw if ns.upper()[:5] in x.upper() or x.upper()[:5] in ns.upper()),"")
+                existente=imps_existentes.get(ns.strip().lower())
+                match=existente.get("nome_impressora","") if existente else ""
+                if not match:
+                    match=next((x for x in iw if ns.upper()[:5] in x.upper() or x.upper()[:5] in ns.upper()),"")
                 icfg.append({"nome":ns,"area":area,"printer_type":ts,"nome_impressora":match,"tipo":"comum_win32","modo":"texto"})
             cfg["impressoras"]=icfg; salvar_config(cfg)
             sv2.set(f"Conectado: {d.get('restaurant_name','')}")
@@ -1897,10 +1906,10 @@ def abrir_config():
             v=ti.item(item,"values")
             nome=v[0]; area=v[1]; nome_win=v[2]; tipo=v[3]
             orig = imps_orig.get(nome.strip().lower(), {})
-            # Deriva printer_type da area se nao existir na config original
-            pt_map = {"caixa":"receipt","cozinha":"kitchen","bar":"bar","delivery":"receipt"}
-            printer_type = orig.get("printer_type") or pt_map.get(area.strip().lower(), "receipt")
-            imps.append({"nome":nome,"area":area,"nome_impressora":nome_win,"tipo":tipo,"modo":"texto","printer_type":printer_type})
+            # printer_type vem do servidor (via config original), area e derivada dele
+            printer_type = orig.get("printer_type") or {"caixa":"receipt","cozinha":"kitchen","bar":"bar"}.get(area.strip().lower(), "receipt")
+            area_correta = {"receipt":"caixa","kitchen":"cozinha","bar":"bar"}.get(printer_type, area)
+            imps.append({"nome":nome,"area":area_correta,"nome_impressora":nome_win,"tipo":tipo,"modo":"texto","printer_type":printer_type})
         cfg["impressoras"]=imps; bals=[]
         for item in tb2.get_children():
             v=tb2.item(item,"values"); n2,t2,c3,b2=v[0],v[1],v[2],v[3]

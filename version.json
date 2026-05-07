@@ -1,5 +1,5 @@
 {
-  "version": "5.21",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.21/AgenteLocal.exe",
-  "notes": "v5.21: Corrige reimpressao - usa roteamento correto por tipo (kitchen vai para cozinha, receipt para caixa), nao mais a ultima impressora usada."
+  "version": "5.22",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.22/AgenteLocal.exe",
+  "notes": "v5.22: Corrige area das impressoras - area e printer_type sempre vem do servidor, preserva nome_impressora mapeado pelo usuario ao reconectar."
 }
