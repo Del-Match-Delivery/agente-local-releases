@@ -748,7 +748,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.20"
+CURRENT_VERSION = "5.21"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1153,11 +1153,17 @@ def abrir_dashboard():
                         {"job_id": jid}, cfg.get("token","")
                     )
                     if s == 200 and resp:
-                        texto = _fmt(resp, job_info.get("tipo","order"), job_info.get("tipo","receipt"))
-                        r = _imprimir_raw(nome_imp, texto)
+                        pt = job_info.get("tipo","receipt")
+                        texto = _fmt(resp, pt, pt)
+                        imp = _res_imp_por_rede(pt)
+                        if not imp:
+                            w.after(0, lambda: messagebox.showerror("Erro", f"Sem impressora configurada para '{pt}'", parent=w))
+                            return
+                        r = _imprimir_com_roteamento(imp, texto)
+                        nome_real = imp.get("nome_impressora") or imp.get("endereco_ip","")
                         if r.get("ok"):
-                            log.info(f"[REIMP] Job {jid} reimpresso em {nome_imp}")
-                            w.after(0, lambda: messagebox.showinfo("OK", f"Reimpresso em:\n{nome_imp}", parent=w))
+                            log.info(f"[REIMP] Job {jid} reimpresso em {nome_real}")
+                            w.after(0, lambda: messagebox.showinfo("OK", f"Reimpresso em:\n{nome_real}", parent=w))
                         else:
                             w.after(0, lambda: messagebox.showerror("Erro", r.get("erro",""), parent=w))
                     else:

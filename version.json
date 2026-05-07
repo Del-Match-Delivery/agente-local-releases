@@ -1,5 +1,5 @@
 {
-  "version": "5.20",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.20/AgenteLocal.exe",
-  "notes": "v5.20: Corrige tamanho de fonte - largura do texto ajustada proporcionalmente para todos os detalhes aparecerem corretamente."
+  "version": "5.21",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.21/AgenteLocal.exe",
+  "notes": "v5.21: Corrige reimpressao - usa roteamento correto por tipo (kitchen vai para cozinha, receipt para caixa), nao mais a ultima impressora usada."
 }
