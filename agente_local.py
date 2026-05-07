@@ -445,6 +445,14 @@ def _fmt(content, jt, pt):
     # Largura do papel: paper_width do content tem prioridade, default 48
     pw = content.get("paper_width")
     w = int(pw) if pw and str(pw).isdigit() else W
+    # Ajusta largura de acordo com o tamanho de fonte ESC/POS configurado
+    # Fonte Grande (1) dobra os caracteres -> metade das colunas cabem
+    # Fonte Extra Grande (2) triplica -> um terco das colunas cabem
+    _fs = int(cfg.get("font_size", 0))
+    if _fs == 1:
+        w = w // 2
+    elif _fs >= 2:
+        w = w // 3
     S="-"*w
 
     # Flags de exibição configuráveis
@@ -740,7 +748,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.19"
+CURRENT_VERSION = "5.20"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

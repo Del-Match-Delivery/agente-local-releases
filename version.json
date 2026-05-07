@@ -1,5 +1,5 @@
 {
-  "version": "5.19",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.19/AgenteLocal.exe",
-  "notes": "v5.19: Botao de tamanho de fonte na aba Impressoras - Normal, Grande, Extra Grande. Configurado por agente e salvo no config.json."
+  "version": "5.20",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.20/AgenteLocal.exe",
+  "notes": "v5.20: Corrige tamanho de fonte - largura do texto ajustada proporcionalmente para todos os detalhes aparecerem corretamente."
 }
