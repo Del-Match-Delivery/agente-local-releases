@@ -448,14 +448,16 @@ def _fmt(content, jt, pt):
     # Largura do papel: paper_width do content tem prioridade, default 48
     pw = content.get("paper_width")
     w = int(pw) if pw and str(pw).isdigit() else W
-    # Ajusta largura de acordo com o tamanho de fonte ESC/POS configurado
-    # Fonte Grande (1) dobra os caracteres -> metade das colunas cabem
-    # Fonte Extra Grande (2) triplica -> um terco das colunas cabem
     _fs = int(cfg.get("font_size", 0))
-    if _fs == 1:
-        w = w // 2
-    elif _fs >= 2:
-        w = w // 3
+    # Para cozinha/bar: nao reduz w — todos os detalhes sempre aparecem.
+    # Fonte grande so no nome do item (inline via ESC/POS); addons/obs em normal.
+    # Para receipt: reduz w para alinhar colunas de preco com a fonte maior.
+    _is_kitchen = jt in ("kitchen","bar") or pt in ("kitchen","bar")
+    if not _is_kitchen:
+        if _fs == 1:
+            w = w // 2
+        elif _fs >= 2:
+            w = w // 3
     S="-"*w
 
     # Flags de exibição configuráveis
@@ -529,47 +531,68 @@ def _fmt(content, jt, pt):
         rod=content.get("footer_message","")
         if rod: ll.append(S); ll.append(rod.center(w))
         ll.append(S)
-    elif tipo=="kitchen":
-        ll+=["*"*w,"COZINHA".center(w),"*"*w]
+    elif tipo in ("kitchen","bar"):
+        titulo = "COZINHA" if tipo=="kitchen" else "BAR"
+        # Cabecalho sempre em fonte normal para caber na largura do papel
+        cab = []
+        cab+=["*"*w, titulo.center(w), "*"*w]
         n=content.get("order_number","")
-        if n: ll.append(f"PEDIDO #{n}".center(w))
+        if n: cab.append(f"PEDIDO #{n}".center(w))
         tp=content.get("order_type","")
-        if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
+        if tp: cab.append(f"** {TL.get(tp,tp.upper())} **".center(w))
         m=content.get("table_number","")
-        if m: ll.append(f"Mesa: {m}")
+        if m: cab.append(f"Mesa: {m}")
         c2=content.get("customer_name","")
-        if c2: ll.append(f"Cliente: {c2}")
-        try:
-            from datetime import datetime
-            dt=content.get("created_at","")
-            ll.append(f"Hora: {datetime.fromisoformat(dt.replace('Z','+00:00')).strftime('%H:%M')}")
-        except: pass
-        ll.append(S)
-        DP="·"*w
-        for item in content.get("items",[]):
-            q=item.get("quantity",item.get("qty",1)); ll.append(f"[ {q}x ]  {item.get('name','')}")
-            for a in item.get("addons",[]): ll.append(f"  + {a.get('name','')}")
-            obs=item.get("notes","")
-            if obs: ll.append(f"  >> {obs}")
-            ll.append(DP)
-        obs2=content.get("notes","")
-        if obs2: ll.append(S); ll.append(f"OBS: {obs2}")
-        ll.append(S)
-    elif tipo=="bar":
-        ll+=["*"*w,"BAR".center(w),"*"*w]
-        n=content.get("order_number","")
-        if n: ll.append(f"PEDIDO #{n}".center(w))
-        m=content.get("table_number","")
-        if m: ll.append(f"Mesa: {m}")
-        ll.append(S)
-        DP="·"*w
-        for item in content.get("items",[]):
-            q=item.get("quantity",item.get("qty",1)); ll.append(f"[ {q}x ]  {item.get('name','')}")
-            for a in item.get("addons",[]): ll.append(f"  + {a.get('name','')}")
-            obs=item.get("notes","")
-            if obs: ll.append(f"  >> {obs}")
-            ll.append(DP)
-        ll.append(S)
+        if c2: cab.append(f"Cliente: {c2}")
+        if tipo=="kitchen":
+            try:
+                from datetime import datetime
+                dt=content.get("created_at","")
+                cab.append(f"Hora: {datetime.fromisoformat(dt.replace('Z','+00:00')).strftime('%H:%M')}")
+            except: pass
+        cab.append(S)
+
+        if _fs <= 0:
+            # Fonte normal: comportamento original — tudo em string
+            ll += cab
+            DP="·"*w
+            for item in content.get("items",[]):
+                q=item.get("quantity",item.get("qty",1)); ll.append(f"[ {q}x ]  {item.get('name','')}")
+                for a in item.get("addons",[]): ll.append(f"  + {a.get('name','')}")
+                obs=item.get("notes","")
+                if obs: ll.append(f"  >> {obs}")
+                ll.append(DP)
+            obs2=content.get("notes","")
+            if obs2: ll.append(S); ll.append(f"OBS: {obs2}")
+            ll.append(S)
+        else:
+            # Fonte grande: retorna bytes com comandos ESC/POS inline.
+            # Cabecalho e detalhes (addons, obs) em normal; nome do item em grande.
+            FNORMAL = b"\x1b\x21\x00"
+            FBIG    = _escpos_font_prefix()
+            DP_str  = "·"*w
+            parts = [FNORMAL]
+            enc = lambda s: (s+"\n").encode("cp850","replace")
+            for linha in cab:
+                parts.append(enc(linha))
+            for item in content.get("items",[]):
+                q=item.get("quantity",item.get("qty",1))
+                nome=item.get("name","")
+                parts.append(FBIG)
+                parts.append(enc(f"[ {q}x ]  {nome}"))
+                parts.append(FNORMAL)
+                for a in item.get("addons",[]):
+                    parts.append(enc(f"  + {a.get('name','')}"))
+                obs=item.get("notes","")
+                if obs: parts.append(enc(f"  >> {obs}"))
+                parts.append(enc(DP_str))
+            obs2=content.get("notes","")
+            if obs2:
+                parts.append(enc(S))
+                parts.append(enc(f"OBS: {obs2}"))
+            parts.append(enc(S))
+            parts.append(FNORMAL)
+            return b"".join(parts)
     elif tipo=="pickup":
         ne=cfg.get("restaurant_name","")
         if ne: ll.append(ne.upper().center(w))
@@ -763,7 +786,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.24"
+CURRENT_VERSION = "5.25"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

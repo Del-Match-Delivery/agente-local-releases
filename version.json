@@ -1,5 +1,5 @@
 {
-  "version": "5.24",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.24/AgenteLocal.exe",
-  "notes": "v5.24: Corrige pedidos nao chegando - areas enviadas ao servidor mesmo sem impressora mapeada; impressora sem nome_impressora gera erro claro ao inves de ignorar jobs silenciosamente."
+  "version": "5.25",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.25/AgenteLocal.exe",
+  "notes": "v5.25: Cozinha/bar sempre imprime todos os detalhes - nome do item em fonte grande, addons e observacoes em fonte normal (nunca corta)."
 }
