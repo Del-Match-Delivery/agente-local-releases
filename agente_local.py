@@ -725,7 +725,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.13"
+CURRENT_VERSION = "5.14"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -2062,9 +2062,10 @@ if __name__ == "__main__":
         try:
             r = subprocess.run(
                 ["wmic", "process", "where", "name like 'AgenteLocal%'",
-                 "get", "ProcessId,ExecutablePath", "/format:csv"],
+                 "get", "ProcessId,ExecutablePath", r"\format:csv"],
                 capture_output=True, text=True, timeout=8
             )
+            mortos = 0
             for linha in r.stdout.splitlines():
                 partes = [p.strip() for p in linha.split(",")]
                 if len(partes) >= 3:
@@ -2077,6 +2078,9 @@ if __name__ == "__main__":
                         subprocess.run(["taskkill", "/F", "/PID", str(pid_outro)],
                                        capture_output=True, timeout=4)
                         log.info(f"[STARTUP] Encerrado processo duplicado PID={pid_outro} ({Path(exe_outro).name})")
+                        mortos += 1
+            if mortos:
+                time.sleep(2)  # Aguarda kernel liberar mutex dos processos mortos
         except Exception as e:
             log.debug(f"[STARTUP] Verificacao duplicados: {e}")
 

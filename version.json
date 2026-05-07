@@ -1,5 +1,5 @@
 {
-  "version": "5.13",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.13/AgenteLocal.exe",
-  "notes": "v5.13: Novo layout de cupom - itens com [ 1x ], adicionais com +, observacoes com >>, separador pontilhado entre itens."
+  "version": "5.14",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.14/AgenteLocal.exe",
+  "notes": "v5.14: Corrige kill de instancias antigas no startup (barra no parametro WMIC), aguarda 2s para kernel liberar mutex antes de checar instancia unica."
 }
