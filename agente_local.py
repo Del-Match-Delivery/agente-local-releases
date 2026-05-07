@@ -749,7 +749,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.22"
+CURRENT_VERSION = "5.23"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1146,12 +1146,9 @@ def abrir_dashboard():
         if idx < len(_stats["historico"]):
             job_info = _stats["historico"][idx]
             jid = job_info.get("job_id","")
-            nome_imp = job_info.get("impressora","")
-            if not nome_imp:
-                messagebox.showerror("Erro","Impressora nao encontrada no historico.",parent=w)
-                return
+            nome_imp_hist = job_info.get("impressora","")
             # Busca o job no Supabase e reimprime
-            def _do_reimp():
+            def _do_reimp(jid=jid, job_info=job_info, nome_imp_hist=nome_imp_hist):
                 try:
                     resp, s = _post(
                         f"{SUPABASE_URL}/functions/v1/agente-get-order",
@@ -1160,9 +1157,12 @@ def abrir_dashboard():
                     if s == 200 and resp:
                         pt = job_info.get("tipo","receipt")
                         texto = _fmt(resp, pt, pt)
+                        # Tenta impressora correta pelo tipo; fallback: impressora do historico
                         imp = _res_imp_por_rede(pt)
+                        if not imp and nome_imp_hist:
+                            imp = {"nome_impressora": nome_imp_hist, "tipo": "comum_win32"}
                         if not imp:
-                            w.after(0, lambda: messagebox.showerror("Erro", f"Sem impressora configurada para '{pt}'", parent=w))
+                            w.after(0, lambda: messagebox.showerror("Erro", f"Sem impressora para '{pt}'", parent=w))
                             return
                         r = _imprimir_com_roteamento(imp, texto)
                         nome_real = imp.get("nome_impressora") or imp.get("endereco_ip","")
