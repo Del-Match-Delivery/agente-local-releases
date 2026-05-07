@@ -423,7 +423,7 @@ TL={"counter":"BALCAO","dine_in":"MESA","takeaway":"RETIRADA","delivery":"DELIVE
 PL={"cash":"Dinheiro","credit":"Cartao Credito","debit":"Cartao Debito","pix":"PIX"}
 
 def _li(q,n,p,w=None):
-    w=w or W; pv=_R(int(q)*int(p)); b=f"{q}x {n}"; e=w-len(b)-len(pv)
+    w=w or W; pv=_R(int(q)*int(p)); b=f"[ {q}x ]  {n}"; e=w-len(b)-len(pv)
     return b+(" "*max(1,e))+pv if e>=1 else f"{b}\n{pv:>{w}}"
 
 def _fmt(content, jt, pt):
@@ -462,13 +462,15 @@ def _fmt(content, jt, pt):
             ll.append(f"Data: {datetime.fromisoformat(dt.replace('Z','+00:00')).strftime('%d/%m/%Y %H:%M')}")
         except: pass
         ll.append(S)
+        DP="·"*w
         for item in content.get("items",[]):
             ll.append(_li(item.get("quantity",1),item.get("name",""),item.get("unit_price_cents",0),w))
-            obs=item.get("notes","")
-            if obs: ll.append(f"  Obs: {obs}")
             for a in item.get("addons",[]):
                 pc=a.get("price_cents",0)
                 ll.append(f"  + {a.get('name','')}{f' {_R(pc)}' if pc else ''}")
+            obs=item.get("notes","")
+            if obs: ll.append(f"  >> {obs}")
+            ll.append(DP)
         ll.append(S)
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         ent=content.get("delivery_fee_cents",0); tot=content.get("total_cents",0)
@@ -517,11 +519,13 @@ def _fmt(content, jt, pt):
             ll.append(f"Hora: {datetime.fromisoformat(dt.replace('Z','+00:00')).strftime('%H:%M')}")
         except: pass
         ll.append(S)
+        DP="·"*w
         for item in content.get("items",[]):
-            q=item.get("quantity",item.get("qty",1)); ll.append(f"  {q}x  {item.get('name','')}")
+            q=item.get("quantity",item.get("qty",1)); ll.append(f"[ {q}x ]  {item.get('name','')}")
+            for a in item.get("addons",[]): ll.append(f"  + {a.get('name','')}")
             obs=item.get("notes","")
-            if obs: ll.append(f"     >> {obs}")
-            for a in item.get("addons",[]): ll.append(f"     + {a.get('name','')}")
+            if obs: ll.append(f"  >> {obs}")
+            ll.append(DP)
         obs2=content.get("notes","")
         if obs2: ll.append(S); ll.append(f"OBS: {obs2}")
         ll.append(S)
@@ -532,10 +536,13 @@ def _fmt(content, jt, pt):
         m=content.get("table_number","")
         if m: ll.append(f"Mesa: {m}")
         ll.append(S)
+        DP="·"*w
         for item in content.get("items",[]):
-            q=item.get("quantity",item.get("qty",1)); ll.append(f"  {q}x  {item.get('name','')}")
+            q=item.get("quantity",item.get("qty",1)); ll.append(f"[ {q}x ]  {item.get('name','')}")
+            for a in item.get("addons",[]): ll.append(f"  + {a.get('name','')}")
             obs=item.get("notes","")
-            if obs: ll.append(f"     >> {obs}")
+            if obs: ll.append(f"  >> {obs}")
+            ll.append(DP)
         ll.append(S)
     elif tipo=="pickup":
         ne=cfg.get("restaurant_name","")
@@ -718,7 +725,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.12"
+CURRENT_VERSION = "5.13"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

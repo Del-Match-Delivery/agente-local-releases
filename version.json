@@ -1,5 +1,5 @@
 {
-  "version": "5.12",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.12/AgenteLocal.exe",
-  "notes": "v5.12: Corrige SSL certificate error no update automatico, evita loop de 401 abrindo configuracoes uma vez."
+  "version": "5.13",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.13/AgenteLocal.exe",
+  "notes": "v5.13: Novo layout de cupom - itens com [ 1x ], adicionais com +, observacoes com >>, separador pontilhado entre itens."
 }
