@@ -1,5 +1,5 @@
 {
-  "version": "5.14",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.14/AgenteLocal.exe",
-  "notes": "v5.14: Corrige kill de instancias antigas no startup (barra no parametro WMIC), aguarda 2s para kernel liberar mutex antes de checar instancia unica."
+  "version": "5.15",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.15/AgenteLocal.exe",
+  "notes": "v5.15: Corrige bat de update - usa taskkill /IM wildcard para matar todos os processos AgenteLocal antes de substituir o exe."
 }

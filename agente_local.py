@@ -725,20 +725,20 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.14"
+CURRENT_VERSION = "5.15"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
 
 def _bat_update(exe_novo: Path, exe_destino: Path, del_extra: str = "") -> str:
-    """Gera conteudo do bat de update. Mata processos, move com retry, lanca UMA vez."""
+    """Gera conteudo do bat de update. Mata processos, move com retry, lanca nova versao."""
     return (
         "@echo off\r\n"
-        # Mata todos os processos AgenteLocal pelo PID via WMIC
-        "for /f \"tokens=2\" %%P in ('wmic process where \"name like 'AgenteLocal%%'\" get ProcessId /format:list 2^>nul ^| findstr ProcessId') do taskkill /F /PID %%P >nul 2>&1\r\n"
-        # Espera 8s para o processo liberar o arquivo
-        "timeout /t 8 /nobreak >nul\r\n"
-        # Move com retry ate ter sucesso
+        # Mata todos os processos AgenteLocal pelo nome (wildcard)
+        "taskkill /F /IM \"AgenteLocal*.exe\" >nul 2>&1\r\n"
+        # Espera processo liberar o arquivo
+        "timeout /t 5 /nobreak >nul\r\n"
+        # Move com retry ate ter sucesso (sem limite de tentativas)
         ":retry\r\n"
         f'move /y "{exe_novo}" "{exe_destino}" >nul 2>&1\r\n'
         "if errorlevel 1 (\r\n"
@@ -746,11 +746,8 @@ def _bat_update(exe_novo: Path, exe_destino: Path, del_extra: str = "") -> str:
         "  goto retry\r\n"
         ")\r\n"
         + del_extra +
-        # Verifica se ja tem instancia rodando antes de lancar
-        "tasklist /FI \"IMAGENAME eq AgenteLocal.exe\" 2>nul | find /I \"AgenteLocal.exe\" >nul\r\n"
-        "if errorlevel 1 (\r\n"
-        f'  powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe_destino}\'"\r\n'
-        ")\r\n"
+        # Lanca nova versao
+        f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe_destino}\'"\r\n'
         'del "%~f0"\r\n'
     )
 
