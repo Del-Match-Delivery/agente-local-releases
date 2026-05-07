@@ -1,5 +1,5 @@
 {
-  "version": "5.18",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.18/AgenteLocal.exe",
-  "notes": "v5.18: Corrige impressao duplicada - agente do caixa nao imprime mais jobs de cozinha/bar quando sem printer_id."
+  "version": "5.19",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.19/AgenteLocal.exe",
+  "notes": "v5.19: Botao de tamanho de fonte na aba Impressoras - Normal, Grande, Extra Grande. Configurado por agente e salvo no config.json."
 }

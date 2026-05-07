@@ -350,6 +350,15 @@ def _callback_peso(nome, peso_kg, status):
         _ultimo_envio_peso[nome] = agora
         ef_enviar_peso(nome, peso_kg)
 
+def _escpos_font_prefix():
+    """Retorna bytes ESC/POS para o tamanho de fonte configurado (0=normal,1=duplo,2=triplo)."""
+    n = int(cfg.get("font_size", 0))
+    if n <= 0:
+        return b"\x1b\x21\x00"  # normal
+    if n == 1:
+        return b"\x1d\x21\x11"  # largura+altura duplos
+    return b"\x1d\x21\x22"      # largura+altura triplos
+
 def _imprimir_raw(nome, conteudo):
     try:
         if HAS_WIN32:
@@ -358,9 +367,10 @@ def _imprimir_raw(nome, conteudo):
                 win32print.StartDocPrinter(h,1,("Cupom",None,"RAW"))
                 win32print.StartPagePrinter(h)
 
-                # Se for string, codifica. Se for bytes (RAW), envia direto.
+                # Se for string, codifica com prefixo de tamanho de fonte. Se for bytes (RAW), envia direto.
                 if isinstance(conteudo, str):
-                    win32print.WritePrinter(h,(conteudo+"\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00").encode("cp850","replace"))
+                    payload = _escpos_font_prefix() + (conteudo+"\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00").encode("cp850","replace")
+                    win32print.WritePrinter(h, payload)
                 else:
                     win32print.WritePrinter(h, conteudo)
 
@@ -382,7 +392,7 @@ def _imprimir_tcp(endereco, conteudo):
             host, porta = endereco, 9100
         with socket.create_connection((host, porta), timeout=10) as s:
             if isinstance(conteudo, str):
-                payload = (conteudo + "\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00").encode("cp850", "replace")
+                payload = _escpos_font_prefix() + (conteudo + "\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00").encode("cp850", "replace")
             else:
                 payload = conteudo
             s.sendall(payload)
@@ -730,7 +740,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.18"
+CURRENT_VERSION = "5.19"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1367,6 +1377,26 @@ def abrir_config():
                        ("Testar Impressao",tst_i,"#cba6f7"),("Ver Log",abrir_log,"#6c7086")]:
         tk.Button(bi2,text=tb,command=cb,bg=cor,fg="#1e1e2e",font=("Segoe UI",9,"bold"),
                   relief="flat",padx=10,pady=5,cursor="hand2").pack(side="left",padx=4)
+
+    # Controle de tamanho de fonte ESC/POS
+    _LABELS_FONTE = ["Normal", "Grande", "Extra Grande"]
+    tk.Frame(bi2,bg="#1e1e2e",width=20).pack(side="left")
+    tk.Label(bi2,text="Fonte:",bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).pack(side="left",padx=(0,4))
+    _fs_var = tk.IntVar(value=int(cfg.get("font_size",0)))
+    lbl_fs = tk.Label(bi2,text=_LABELS_FONTE[_fs_var.get()],bg="#313244",fg="#f9e2af",
+                      font=("Segoe UI",9,"bold"),padx=10,pady=5,width=12)
+    lbl_fs.pack(side="left",padx=2)
+    def _set_font_size(delta):
+        v = max(0, min(2, _fs_var.get() + delta))
+        _fs_var.set(v)
+        cfg["font_size"] = v
+        salvar_config(cfg)
+        lbl_fs.config(text=_LABELS_FONTE[v])
+    tk.Button(bi2,text="A-",command=lambda:_set_font_size(-1),bg="#45475a",fg="#cdd6f4",
+              font=("Segoe UI",9,"bold"),relief="flat",padx=8,pady=5,cursor="hand2").pack(side="left",padx=2)
+    tk.Button(bi2,text="A+",command=lambda:_set_font_size(1),bg="#45475a",fg="#cdd6f4",
+              font=("Segoe UI",9,"bold"),relief="flat",padx=8,pady=5,cursor="hand2").pack(side="left",padx=2)
+
     f2.columnconfigure(0,weight=1); f2.rowconfigure(1,weight=1)
 
     # BALANCAS
