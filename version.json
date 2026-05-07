@@ -1,5 +1,5 @@
 {
-  "version": "5.25",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.25/AgenteLocal.exe",
-  "notes": "v5.25: Cozinha/bar sempre imprime todos os detalhes - nome do item em fonte grande, addons e observacoes em fonte normal (nunca corta)."
+  "version": "5.26",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.26/AgenteLocal.exe",
+  "notes": "v5.26: Corrige layout do cupom - remove data/hora, corrige Mesa com valor errado, traduz pagamento card, pickup mostra todos detalhes, preco zero omitido dos itens."
 }

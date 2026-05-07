@@ -438,10 +438,13 @@ def _R(v):
 
 W=48
 TL={"counter":"BALCAO","dine_in":"MESA","takeaway":"RETIRADA","delivery":"DELIVERY"}
-PL={"cash":"Dinheiro","credit":"Cartao Credito","debit":"Cartao Debito","pix":"PIX"}
+PL={"cash":"Dinheiro","credit":"Cartao Credito","debit":"Cartao Debito","pix":"PIX","card":"Cartao","money":"Dinheiro","creditcard":"Cartao Credito","debitcard":"Cartao Debito"}
 
 def _li(q,n,p,w=None):
-    w=w or W; pv=_R(int(q)*int(p)); b=f"[ {q}x ]  {n}"; e=w-len(b)-len(pv)
+    w=w or W; b=f"[ {q}x ]  {n}"
+    total=int(q)*int(p) if p else 0
+    if total<=0: return b  # sem preco quando zero (mesa com pagamento no final etc)
+    pv=_R(total); e=w-len(b)-len(pv)
     return b+(" "*max(1,e))+pv if e>=1 else f"{b}\n{pv:>{w}}"
 
 def _fmt(content, jt, pt):
@@ -479,16 +482,14 @@ def _fmt(content, jt, pt):
         if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
         c2=content.get("customer_name","")
         if c2: ll.append(f"Cliente: {c2}")
+        # Mesa: só mostra se for diferente do tipo de pedido (evita "Mesa: COMER AQUI")
         m=content.get("table_number","")
-        if m: ll.append(f"Mesa: {m}")
+        tipos_pedido = list(TL.keys()) + list(TL.values()) + ["pickup","counter","dine_in","takeaway","delivery","retirada","mesa","balcao","comer aqui"]
+        if m and str(m).lower() not in [x.lower() for x in tipos_pedido]:
+            ll.append(f"Mesa: {m}")
         # Telefone do cliente (controlado por print_customer_info)
         ph=content.get("customer_phone","")
         if ph and show_phone: ll.append(f"Tel: {ph}")
-        try:
-            from datetime import datetime
-            dt=content.get("created_at","")
-            ll.append(f"Data: {datetime.fromisoformat(dt.replace('Z','+00:00')).strftime('%d/%m/%Y %H:%M')}")
-        except: pass
         ll.append(S)
         DP="·"*w
         for item in content.get("items",[]):
@@ -510,7 +511,7 @@ def _fmt(content, jt, pt):
             ev=_R(ent); ll.append(f"{'Taxa entrega:':<{w-len(ev)}}{ev}")
         tv=_R(tot); ll.append(f"{'TOTAL:':<{w-len(tv)}}{tv}")
         pg=content.get("payment_method","")
-        if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg,pg)}")
+        if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
         cod=content.get("pickup_code","")
         if cod: ll.append("="*w); ll.append(f"RETIRADA: {cod}".center(w)); ll.append("="*w)
         obs2=content.get("notes","")
@@ -594,14 +595,44 @@ def _fmt(content, jt, pt):
             parts.append(FNORMAL)
             return b"".join(parts)
     elif tipo=="pickup":
-        ne=cfg.get("restaurant_name","")
+        ne=content.get("company_name","") or cfg.get("restaurant_name","")
         if ne: ll.append(ne.upper().center(w))
-        ll.append("*** RETIRADA ***".center(w))
-        cod=content.get("pickup_code","")
-        if cod: ll.append(f"CODIGO: {cod}".center(w))
+        e=content.get("company_address","")
+        if e: ll.append(e.center(w))
+        ll.append(S)
+        n=content.get("order_number","")
+        if n: ll.append(f"PEDIDO #{n}".center(w))
+        tp=content.get("order_type","")
+        if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
         c2=content.get("customer_name","")
         if c2: ll.append(f"Cliente: {c2}")
-        ll.append(f"Total: {_R(content.get('total_cents',0))}"); ll.append(S)
+        ph=content.get("customer_phone","")
+        if ph and show_phone: ll.append(f"Tel: {ph}")
+        cod=content.get("pickup_code","")
+        if cod: ll.append(f"Codigo: {cod}".center(w))
+        ll.append(S)
+        DP="·"*w
+        for item in content.get("items",[]):
+            ll.append(_li(item.get("quantity",1),item.get("name",""),item.get("unit_price_cents",0),w))
+            for a in item.get("addons",[]):
+                pc=a.get("price_cents",0)
+                ll.append(f"  + {a.get('name','')}{f' {_R(pc)}' if pc else ''}")
+            obs=item.get("notes","")
+            if obs: ll.append(f"  >> {obs}")
+            ll.append(DP)
+        ll.append(S)
+        sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
+        tot=content.get("total_cents",0)
+        if sub:
+            sv=_R(sub); ll.append(f"{'Subtotal:':<{w-len(sv)}}{sv}")
+        if desc and int(desc)>0:
+            dv=f"-{_R(desc)}"; ll.append(f"{'Desconto:':<{w-len(dv)}}{dv}")
+        tv=_R(tot); ll.append(f"{'TOTAL:':<{w-len(tv)}}{tv}")
+        pg=content.get("payment_method","")
+        if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
+        obs2=content.get("notes","")
+        if obs2: ll.append(S); ll.append(f"Obs: {obs2}")
+        ll.append(S)
     elif tipo=="delivery":
         ne=content.get("company_name","") or cfg.get("restaurant_name","")
         if ne: ll.append(ne.upper().center(w))
@@ -613,10 +644,27 @@ def _fmt(content, jt, pt):
         t2=content.get("customer_phone","")
         if t2: ll.append(f"Tel: {t2}")
         ll.append(S)
-        for item in content.get("items",[]): ll.append(f"  {item.get('quantity',1)}x  {item.get('name','')}")
-        ll.append(S); tv=_R(content.get("total_cents",0)); ll.append(f"TOTAL: {tv}")
+        DP="·"*w
+        for item in content.get("items",[]):
+            ll.append(_li(item.get("quantity",1),item.get("name",""),item.get("unit_price_cents",0),w))
+            for a in item.get("addons",[]):
+                pc=a.get("price_cents",0)
+                ll.append(f"  + {a.get('name','')}{f' {_R(pc)}' if pc else ''}")
+            obs=item.get("notes","")
+            if obs: ll.append(f"  >> {obs}")
+            ll.append(DP)
+        ll.append(S)
+        sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
+        ent=content.get("delivery_fee_cents",0); tot=content.get("total_cents",0)
+        if sub:
+            sv=_R(sub); ll.append(f"{'Subtotal:':<{w-len(sv)}}{sv}")
+        if desc and int(desc)>0:
+            dv=f"-{_R(desc)}"; ll.append(f"{'Desconto:':<{w-len(dv)}}{dv}")
+        if ent and int(ent)>0:
+            ev=_R(ent); ll.append(f"{'Taxa entrega:':<{w-len(ev)}}{ev}")
+        tv=_R(tot); ll.append(f"{'TOTAL:':<{w-len(tv)}}{tv}")
         pg=content.get("payment_method","")
-        if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg,pg)}")
+        if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
         # Endereço de entrega
         addr=content.get("delivery_address","") or content.get("delivery_address_street","")
         if addr:
@@ -786,7 +834,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.25"
+CURRENT_VERSION = "5.26"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
