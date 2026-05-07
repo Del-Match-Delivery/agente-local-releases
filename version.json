@@ -1,5 +1,5 @@
 {
-  "version": "5.27",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.27/AgenteLocal.exe",
-  "notes": "v5.27: Cupom sem data/hora, tipos traduzidos (ENTREGA/RETIRADA/MESA/BALCAO), delivery com endereco e obs, pagamento traduzido em todos os tipos."
+  "version": "5.28",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.28/AgenteLocal.exe",
+  "notes": "v5.28: Corrige update - cleanup nao apaga mais o exe novo que esta sendo instalado."
 }

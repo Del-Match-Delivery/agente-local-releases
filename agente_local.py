@@ -840,7 +840,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.27"
+CURRENT_VERSION = "5.28"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -2256,8 +2256,19 @@ if __name__ == "__main__":
     # Remove exes versionados antigos em background (pode estar em uso logo apos update)
     if getattr(sys, 'frozen', False):
         def _cleanup_old_exes():
-            time.sleep(5)  # Aguarda processo anterior liberar o arquivo
+            time.sleep(10)  # Aguarda bat de update terminar de mover o arquivo
             for f in BASE_DIR.glob("AgenteLocal_*.exe"):
+                # Extrai versao do nome: AgenteLocal_5.23.exe -> "5.23"
+                try:
+                    ver_str = f.stem.replace("AgenteLocal_", "")
+                    ver_parts = [int(x) for x in ver_str.split(".")]
+                    cur_parts = [int(x) for x in CURRENT_VERSION.split(".")]
+                    # So apaga se for versao MENOR ou IGUAL a atual (nunca a que esta sendo instalada)
+                    if ver_parts > cur_parts:
+                        log.info(f"[CLEANUP] Ignorando {f.name} (versao futura, update em andamento)")
+                        continue
+                except Exception:
+                    pass  # nome estranho: tenta apagar mesmo assim
                 for _ in range(3):
                     try:
                         f.unlink()
