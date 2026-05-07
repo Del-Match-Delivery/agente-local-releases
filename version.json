@@ -1,5 +1,5 @@
 {
-  "version": "5.17",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.17/AgenteLocal.exe",
-  "notes": "v5.17: Corrige loop infinito de update - lock file impede multiplos bats concorrentes, limite de 10 tentativas no move, relanca exe em caso de falha."
+  "version": "5.18",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.18/AgenteLocal.exe",
+  "notes": "v5.18: Corrige impressao duplicada - agente do caixa nao imprime mais jobs de cozinha/bar quando sem printer_id."
 }

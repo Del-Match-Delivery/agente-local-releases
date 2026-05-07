@@ -392,6 +392,8 @@ def _imprimir_tcp(endereco, conteudo):
 
 def _res_imp_por_rede(pt, printer_id=None):
     """Resolve impressora considerando multi-rede e fallback para config legada."""
+    areas_mapa = {"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"],"delivery":["delivery"],"pickup":["balcao","pickup"]}
+    areas_pt = areas_mapa.get(pt, [pt])
     redes = cfg.get("redes", [])
     # Busca nas redes configuradas
     for rede in redes:
@@ -399,8 +401,11 @@ def _res_imp_por_rede(pt, printer_id=None):
             if printer_id and (imp.get("id") == printer_id or imp.get("nome") == printer_id):
                 return imp
             if not printer_id and imp.get("printer_type") == pt:
-                return imp
-    # Fallback: config legada (impressoras na raiz)
+                # Verifica se esta impressora pertence a area deste agente
+                area_imp = imp.get("area", "").strip().lower()
+                if not area_imp or area_imp in areas_pt:
+                    return imp
+    # Fallback: config legada (impressoras na raiz) — ja filtra por area do agente
     nome = _res_imp(pt)
     if nome:
         return {"nome_impressora": nome, "tipo": "comum_win32"}
@@ -725,7 +730,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.17"
+CURRENT_VERSION = "5.18"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
