@@ -437,7 +437,7 @@ def _R(v):
     except: return "R$ 0,00"
 
 W=48
-TL={"counter":"BALCAO","dine_in":"MESA","takeaway":"RETIRADA","delivery":"DELIVERY"}
+TL={"counter":"BALCAO","dine_in":"MESA","takeaway":"RETIRADA","delivery":"ENTREGA","pickup":"RETIRADA","table":"MESA","balcao":"BALCAO","mesa":"MESA","retirada":"RETIRADA","entrega":"ENTREGA"}
 PL={"cash":"Dinheiro","credit":"Cartao Credito","debit":"Cartao Debito","pix":"PIX","card":"Cartao","money":"Dinheiro","creditcard":"Cartao Credito","debitcard":"Cartao Debito"}
 
 def _li(q,n,p,w=None):
@@ -636,13 +636,17 @@ def _fmt(content, jt, pt):
     elif tipo=="delivery":
         ne=content.get("company_name","") or cfg.get("restaurant_name","")
         if ne: ll.append(ne.upper().center(w))
-        ll.append("*** ENTREGA ***".center(w)); ll.append(S)
+        e=content.get("company_address","")
+        if e: ll.append(e.center(w))
+        ll.append(S)
         n=content.get("order_number","")
         if n: ll.append(f"PEDIDO #{n}".center(w))
+        tp=content.get("order_type","delivery")
+        ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
         c2=content.get("customer_name","")
         if c2: ll.append(f"Cliente: {c2}")
         t2=content.get("customer_phone","")
-        if t2: ll.append(f"Tel: {t2}")
+        if t2 and show_phone: ll.append(f"Tel: {t2}")
         ll.append(S)
         DP="·"*w
         for item in content.get("items",[]):
@@ -665,6 +669,8 @@ def _fmt(content, jt, pt):
         tv=_R(tot); ll.append(f"{'TOTAL:':<{w-len(tv)}}{tv}")
         pg=content.get("payment_method","")
         if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
+        obs2=content.get("notes","")
+        if obs2: ll.append(S); ll.append(f"Obs: {obs2}")
         # Endereço de entrega
         addr=content.get("delivery_address","") or content.get("delivery_address_street","")
         if addr:
@@ -834,7 +840,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.26"
+CURRENT_VERSION = "5.27"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
