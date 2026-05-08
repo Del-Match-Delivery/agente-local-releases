@@ -1,5 +1,5 @@
 {
-  "version": "5.31",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.31/AgenteLocal.exe",
-  "notes": "v5.31: Fix update automatico (exe novo nao era deletado pelo cleanup). Fix cupom sem itens (items vazio forcava busca no banco)."
+  "version": "5.32",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.32/AgenteLocal.exe",
+  "notes": "v5.32: Fix multiplas instancias - mutex verificado antes de matar processos. Fix update automatico (download como .tmp). Fix cupom sem itens."
 }

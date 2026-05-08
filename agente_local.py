@@ -851,7 +851,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.31"
+CURRENT_VERSION = "5.32"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -2272,38 +2272,35 @@ if __name__ == "__main__":
         import ctypes
 
         meu_pid = os.getpid()
-        meu_exe = Path(sys.executable).name.lower()
 
-        # Mata qualquer outro processo AgenteLocal que nao seja este PID
-        # Cobre caso de exe versionado antigo ainda rodando ou dupla inicializacao no startup
-        try:
-            r = subprocess.run(
-                ["wmic", "process", "where", "name like 'AgenteLocal%'",
-                 "get", "ProcessId,ExecutablePath", r"\format:csv"],
-                capture_output=True, text=True, timeout=8
-            )
-            mortos = 0
-            for linha in r.stdout.splitlines():
-                partes = [p.strip() for p in linha.split(",")]
-                if len(partes) >= 3:
-                    try:
-                        pid_outro = int(partes[-1])
-                        exe_outro = partes[-2].lower()
-                    except ValueError:
-                        continue
-                    if pid_outro != meu_pid and pid_outro > 0:
-                        subprocess.run(["taskkill", "/F", "/PID", str(pid_outro)],
-                                       capture_output=True, timeout=4)
-                        log.info(f"[STARTUP] Encerrado processo duplicado PID={pid_outro} ({Path(exe_outro).name})")
-                        mortos += 1
-            if mortos:
-                time.sleep(2)  # Aguarda kernel liberar mutex dos processos mortos
-        except Exception as e:
-            log.debug(f"[STARTUP] Verificacao duplicados: {e}")
-
-        # Mutex global (handle mantido em variavel de modulo para evitar GC)
+        # Mutex global — verifica ANTES de matar qualquer processo
+        # Evita que multiplas instancias passem ao mesmo tempo quando uma mata a outra
         _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, True, "AgenteLocalMIA_SingleInstance")
-        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        _mutex_err = ctypes.windll.kernel32.GetLastError()
+        if _mutex_err == 183:  # ERROR_ALREADY_EXISTS — ja tem uma instancia com o mutex
+            # Verifica se o processo que tem o mutex ainda esta vivo
+            # Se o outro processo for uma versao antiga (versionada), mata e assume
+            time.sleep(1)
+            _mutex_err2 = ctypes.windll.kernel32.GetLastError()
+            # Tenta matar processos versionados antigos (AgenteLocal_X.Y.exe) mas nao AgenteLocal.exe
+            try:
+                r = subprocess.run(
+                    ["wmic", "process", "where", "name like 'AgenteLocal_%'",
+                     "get", "ProcessId", r"\format:csv"],
+                    capture_output=True, text=True, timeout=5
+                )
+                for linha in r.stdout.splitlines():
+                    partes = [p.strip() for p in linha.split(",")]
+                    if len(partes) >= 2:
+                        try:
+                            pid_outro = int(partes[-1])
+                            if pid_outro != meu_pid and pid_outro > 0:
+                                subprocess.run(["taskkill", "/F", "/PID", str(pid_outro)],
+                                               capture_output=True, timeout=4)
+                        except ValueError:
+                            continue
+            except Exception:
+                pass
             log.warning("[STARTUP] Outra instancia ja esta rodando. Encerrando.")
             sys.exit(0)
 
