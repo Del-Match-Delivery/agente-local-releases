@@ -405,8 +405,7 @@ def _imprimir_tcp(endereco, conteudo):
 
 def _res_imp_por_rede(pt, printer_id=None):
     """Resolve impressora considerando multi-rede e fallback para config legada."""
-    areas_mapa = {"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"],"delivery":["delivery"],"pickup":["balcao","pickup"]}
-    areas_pt = areas_mapa.get(pt, [pt])
+    areas_pt = _areas_para_tipo(pt)
     redes = cfg.get("redes", [])
     # Busca nas redes configuradas
     for rede in redes:
@@ -468,6 +467,9 @@ def _fmt(content, jt, pt):
     show_payment  = content.get("print_payment_method", True)
 
     tipo=content.get("type",jt); ll=[]
+    # Normaliza tipos de salao/mesa para o layout receipt
+    if tipo not in ("order","receipt","kitchen","bar","pickup","delivery","command","test_page"):
+        tipo = "receipt"
     if tipo in ("order","receipt"):
         ne=content.get("company_name","") or cfg.get("restaurant_name","")
         if ne: ll.append(ne.upper().center(w))
@@ -696,21 +698,28 @@ def _fmt(content, jt, pt):
 
 def _res_imp(pt):
     imps=cfg.get("impressoras",[])
-    areas={"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"]}.get(pt,[pt])
+    areas=_areas_para_tipo(pt)
     for i in imps:
         if i.get("area","").strip().lower() in areas or i.get("printer_type")==pt:
             n=i.get("nome_impressora","")
             if n: return n
-    # Sem fallback — nao imprime no lugar errado se nao tem impressora para este tipo
     return ""
+
+_TIPOS_KITCHEN = {"kitchen","bar"}
+
+def _areas_para_tipo(pt):
+    """Retorna lista de areas aceitas para um printer_type. Tipos desconhecidos → receipt/caixa."""
+    mapa = {"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"],"delivery":["delivery"],"pickup":["balcao","pickup"]}
+    if pt in mapa:
+        return mapa[pt]
+    return ["cozinha","kitchen","bar"] if pt in _TIPOS_KITCHEN else ["caixa","receipt"]
 
 def _agente_cobre_tipo(pt):
     """Retorna True se este agente tem impressora configurada para o printer_type pt."""
     imps = cfg.get("impressoras", [])
     if not imps:
         return True  # sem config, aceita tudo (modo legado)
-    areas_mapa = {"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"],"delivery":["delivery"],"pickup":["balcao","pickup"]}
-    areas_pt = areas_mapa.get(pt, [pt])
+    areas_pt = _areas_para_tipo(pt)
     for i in imps:
         area = i.get("area","").strip().lower()
         ptype = i.get("printer_type","")
@@ -728,8 +737,7 @@ def proc_job(job):
     # Se agente nao tem impressora para este tipo, marca failed no servidor para nao ficar em loop
     if not _agente_cobre_tipo(pt):
         imps = cfg.get("impressoras", [])
-        areas_mapa = {"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"],"delivery":["delivery"],"pickup":["balcao","pickup"]}
-        areas_pt = areas_mapa.get(pt, [pt])
+        areas_pt = _areas_para_tipo(pt)
         # Verifica se tem impressora sem nome mapeado (config incompleta) vs nao e agente deste tipo
         tem_area = any((i.get("area","").strip().lower() in areas_pt or i.get("printer_type","") == pt) for i in imps)
         if tem_area:
@@ -841,7 +849,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.29"
+CURRENT_VERSION = "5.30"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
