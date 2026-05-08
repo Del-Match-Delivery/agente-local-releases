@@ -1,5 +1,5 @@
 {
-  "version": "5.28",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.28/AgenteLocal.exe",
-  "notes": "v5.28: Corrige update - cleanup nao apaga mais o exe novo que esta sendo instalado."
+  "version": "5.29",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.29/AgenteLocal.exe",
+  "notes": "v5.29: Reimpressao com todos os detalhes do pedido, timeout de rede aumentado para evitar interrupcoes."
 }

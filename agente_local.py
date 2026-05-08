@@ -246,7 +246,7 @@ def ef_poll_jobs():
     if areas:
         payload["areas"] = areas
     log.info(f"[POLL] Enviando areas={areas} | token: {cfg.get('token','')[:12]}...")
-    resp,s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, cfg.get("token",""))
+    resp,s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, cfg.get("token",""), timeout=45, retries=2)
     if s==200 and resp:
         _token_invalido = False
         _agents_online = resp.get("agents_online", [])
@@ -815,6 +815,7 @@ def proc_job(job):
         "impressora": nome_imp,
         "tipo": pt,
         "job_id": jid,
+        "order_id": content.get("order_id","") if content else "",
         "content_ref": content.get("order_number","") or content.get("order_id","")[:8] if content else ""
     }
     _stats["historico"].insert(0, entrada)
@@ -840,7 +841,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.28"
+CURRENT_VERSION = "5.29"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1241,12 +1242,31 @@ def abrir_dashboard():
             # Busca o job no Supabase e reimprime
             def _do_reimp(jid=jid, job_info=job_info, nome_imp_hist=nome_imp_hist):
                 try:
-                    resp, s = _post(
-                        f"{SUPABASE_URL}/functions/v1/agente-get-order",
-                        {"job_id": jid}, cfg.get("token","")
-                    )
-                    if s == 200 and resp:
-                        pt = job_info.get("tipo","receipt")
+                    oid_hist = job_info.get("order_id","") or job_info.get("content_ref","")
+                    pt = job_info.get("tipo","receipt")
+                    # Busca pedido completo via agent-get-order (mesmo endpoint do proc_job)
+                    resp = ef_get_order(oid_hist) if oid_hist and len(oid_hist) >= 36 else None
+                    if not resp:
+                        # Fallback: tenta via job_id no agente-get-order legado
+                        resp2, s2 = _post(
+                            f"{SUPABASE_URL}/functions/v1/agente-get-order",
+                            {"job_id": jid}, cfg.get("token","")
+                        )
+                        resp = resp2 if s2 == 200 and resp2 else None
+                    if resp:
+                        # Normaliza order_items → items (igual ao proc_job)
+                        if "order_items" in resp and "items" not in resp:
+                            raw_items = resp.get("order_items") or []
+                            resp["items"] = [
+                                {
+                                    "name": it.get("name_snapshot") or it.get("product_name") or it.get("name",""),
+                                    "quantity": it.get("quantity",1),
+                                    "unit_price_cents": it.get("price_cents_snapshot") or it.get("unit_price_cents",0),
+                                    "notes": it.get("notes",""),
+                                    "addons": it.get("addons_json") or it.get("addons",[]),
+                                }
+                                for it in raw_items
+                            ]
                         texto = _fmt(resp, pt, pt)
                         # Tenta impressora correta pelo tipo; fallback: impressora do historico
                         imp = _res_imp_por_rede(pt)
@@ -1263,7 +1283,7 @@ def abrir_dashboard():
                         else:
                             w.after(0, lambda: messagebox.showerror("Erro", r.get("erro",""), parent=w))
                     else:
-                        w.after(0, lambda: messagebox.showerror("Erro","Nao foi possivel buscar o job.",parent=w))
+                        w.after(0, lambda: messagebox.showerror("Erro","Nao foi possivel buscar o pedido.",parent=w))
                 except Exception as e:
                     w.after(0, lambda: messagebox.showerror("Erro", str(e), parent=w))
             threading.Thread(target=_do_reimp, daemon=True).start()
@@ -1426,35 +1446,41 @@ def abrir_config():
                                     imp.get("nome_impressora",""),imp.get("tipo","comum_win32")),tags=(tag,))
 
     ef2=tk.Frame(f2,bg="#2a2a3e",relief="ridge",bd=1); ef2.grid(row=2,column=0,columnspan=6,padx=10,pady=4,sticky="ew")
-    tk.Label(ef2,text="Impressora Windows:",bg="#2a2a3e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).grid(row=0,column=0,padx=10,pady=10)
-    eiw=ttk.Combobox(ef2,values=iw,width=38); eiw.grid(row=0,column=1,padx=8,pady=10)
-    lbe=tk.Label(ef2,text="<< Clique DUPLO em uma linha",bg="#2a2a3e",fg="#6c7086",font=("Segoe UI",8)); lbe.grid(row=0,column=2,padx=8)
+    tk.Label(ef2,text="Area:",bg="#2a2a3e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).grid(row=0,column=0,padx=(10,4),pady=10)
+    earea=ttk.Combobox(ef2,values=["caixa","cozinha","bar","delivery","balcao"],width=10); earea.grid(row=0,column=1,padx=4,pady=10)
+    tk.Label(ef2,text="Impressora Windows:",bg="#2a2a3e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).grid(row=0,column=2,padx=4,pady=10)
+    eiw=ttk.Combobox(ef2,values=iw,width=34); eiw.grid(row=0,column=3,padx=8,pady=10)
+    lbe=tk.Label(ef2,text="<< Clique DUPLO em uma linha",bg="#2a2a3e",fg="#6c7086",font=("Segoe UI",8)); lbe.grid(row=0,column=4,padx=8)
 
     def duplo(e):
         sel=ti.selection()
         if not sel: return
         vals=ti.item(sel[0],"values"); lbe.config(text=f"Editando: {vals[0]}",fg="#89b4fa")
+        earea.set(vals[1] if len(vals)>1 else "")
         eiw.set(vals[2] if len(vals)>2 else ""); eiw.focus()
 
     def aplicar():
         sel=ti.selection()
         if not sel: messagebox.showwarning("Aviso","Clique duplo em uma linha!",parent=w); return
-        nova=eiw.get().strip()
+        nova=eiw.get().strip(); nova_area=earea.get().strip()
         if not nova: messagebox.showwarning("Aviso","Selecione a Impressora Windows!",parent=w); return
-        vals=ti.item(sel[0],"values"); ti.item(sel[0],values=(vals[0],vals[1],nova,vals[3]),tags=("",))
-        lbe.config(text=f"OK: {vals[0]} -> {nova}",fg="#a6e3a1"); eiw.set("")
+        vals=ti.item(sel[0],"values")
+        area_final = nova_area or vals[1]
+        ti.item(sel[0],values=(vals[0],area_final,nova,vals[3]),tags=("",))
+        lbe.config(text=f"OK: {vals[0]} -> {nova}",fg="#a6e3a1"); eiw.set(""); earea.set("")
         # Salva imediatamente no cfg e no disco
         nome_sistema = vals[0]
         for imp in cfg.get("impressoras",[]):
             if imp.get("nome") == nome_sistema:
                 imp["nome_impressora"] = nova
+                if nova_area: imp["area"] = nova_area
                 break
         salvar_config(cfg)
-        log.info(f"[CONFIG] Impressora '{nome_sistema}' mapeada para '{nova}'")
+        log.info(f"[CONFIG] Impressora '{nome_sistema}' area={area_final} -> '{nova}'")
 
     ti.bind("<Double-1>",duplo)
     tk.Button(ef2,text="Aplicar",command=aplicar,bg="#89b4fa",fg="#1e1e2e",
-              font=("Segoe UI",9,"bold"),relief="flat",padx=14,pady=6,cursor="hand2").grid(row=0,column=3,padx=8)
+              font=("Segoe UI",9,"bold"),relief="flat",padx=14,pady=6,cursor="hand2").grid(row=0,column=5,padx=8)
 
     fi2=ttk.Frame(f2); fi2.grid(row=3,column=0,columnspan=6,padx=10,pady=4,sticky="ew")
     ttk.Label(fi2,text="Novo:").grid(row=0,column=0,padx=4,pady=6)
@@ -1486,9 +1512,23 @@ def abrir_config():
         if r.get("ok"): messagebox.showinfo("OK",f"Teste enviado:\n{nw}",parent=w)
         else: messagebox.showerror("Erro",r.get("erro",""),parent=w)
 
+    def sync_e_recarregar():
+        def _do():
+            sincronizar_impressoras()
+            def _ui():
+                ti.delete(*ti.get_children())
+                for imp in cfg.get("impressoras",[]):
+                    tag="" if imp.get("nome_impressora") else "sem_map"
+                    ti.insert("",tk.END,values=(imp.get("nome",""),imp.get("area",""),
+                                                imp.get("nome_impressora",""),imp.get("tipo","comum_win32")),tags=(tag,))
+                messagebox.showinfo("Sincronizado","Impressoras atualizadas do servidor!",parent=w)
+            w.after(0,_ui)
+        threading.Thread(target=_do, daemon=True).start()
+
     bi2=tk.Frame(f2,bg="#1e1e2e"); bi2.grid(row=4,column=0,columnspan=6,padx=10,pady=6,sticky="w")
     for tb,cb,cor in [("+ Adicionar",add_i,"#a6e3a1"),("Remover",rem_i,"#f38ba8"),
-                       ("Testar Impressao",tst_i,"#cba6f7"),("Ver Log",abrir_log,"#6c7086")]:
+                       ("Testar Impressao",tst_i,"#cba6f7"),("Sincronizar",sync_e_recarregar,"#fab387"),
+                       ("Ver Log",abrir_log,"#6c7086")]:
         tk.Button(bi2,text=tb,command=cb,bg=cor,fg="#1e1e2e",font=("Segoe UI",9,"bold"),
                   relief="flat",padx=10,pady=5,cursor="hand2").pack(side="left",padx=4)
 
