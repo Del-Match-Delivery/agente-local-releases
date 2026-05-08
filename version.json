@@ -1,5 +1,5 @@
 {
-  "version": "5.30",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.30/AgenteLocal.exe",
-  "notes": "v5.30: Jobs de mesa/dine_in/table e outros tipos agora impressos corretamente na caixa."
+  "version": "5.31",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.31/AgenteLocal.exe",
+  "notes": "v5.31: Fix update automatico (exe novo nao era deletado pelo cleanup). Fix cupom sem itens (items vazio forcava busca no banco)."
 }

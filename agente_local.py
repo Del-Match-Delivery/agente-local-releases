@@ -751,7 +751,9 @@ def proc_job(job):
     oid=content.get("order_id")
     # Busca pedido completo apenas se o content chegou vazio (só com order_id/type/auto_print)
     # Se já tem items ou campos de layout (paper_width, receipt_font_size, etc.) usa direto
-    _content_rico = "items" in content or "paper_width" in content or "receipt_font_size" in content or "company_name" in content
+    # Considera rico apenas se items nao esta vazio (items:[] indica que o servidor nao preencheu)
+    _content_rico = (("items" in content and len(content.get("items") or []) > 0)
+                     or "paper_width" in content or "receipt_font_size" in content or "company_name" in content)
     if oid and not _content_rico:
         p=ef_get_order(oid)
         if p:
@@ -849,7 +851,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.30"
+CURRENT_VERSION = "5.31"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -894,15 +896,21 @@ def _baixar_e_aplicar_update(nova, url_nova):
     """Roda em thread separada: baixa o exe novo e aplica sem travar o poll."""
     global _update_em_andamento
     try:
+        # Baixa como .tmp para evitar que o cleanup de versoes antigas apague antes do bat mover
+        exe_tmp = BASE_DIR / f"AgenteLocal_update.tmp"
         exe_novo = BASE_DIR / f"AgenteLocal_{nova}.exe"
         log.info(f"[UPDATE] Baixando v{nova}...")
         req = urllib.request.Request(url_nova)
-        with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as r, open(exe_novo, "wb") as f:
+        with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as r, open(exe_tmp, "wb") as f:
             while True:
                 chunk = r.read(65536)
                 if not chunk:
                     break
                 f.write(chunk)
+        # Renomeia para .exe so apos download completo
+        if exe_novo.exists():
+            exe_novo.unlink()
+        exe_tmp.rename(exe_novo)
         log.info(f"[UPDATE] Download concluido: {exe_novo}")
         exe_destino = BASE_DIR / "AgenteLocal.exe"
         exe_atual = Path(sys.executable)
