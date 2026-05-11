@@ -1,5 +1,5 @@
 {
-  "version": "5.42",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.42/AgenteLocal.exe",
-  "notes": "v5.42: Verificacao de atualizacao a cada 1 minuto (era 5 minutos)."
+  "version": "5.43",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.43/AgenteLocal.exe",
+  "notes": "v5.43: Corrige loop infinito de jobs receipt no agente da cozinha - job entregue ao agente errado e ignorado quando outro agente online cobre o tipo."
 }

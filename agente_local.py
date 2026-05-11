@@ -805,18 +805,29 @@ def proc_job(job):
     _pedido_ref = content.get("order_number","") or content.get("order_id","")[:8] if content else ""
     _cliente_ref = content.get("customer_name","") if content else ""
 
-    # Se agente nao tem impressora para este tipo, marca failed no servidor para nao ficar em loop
+    # Se agente nao tem impressora mapeada para este tipo, verifica se outro agente online cobre
     if not _agente_cobre_tipo(pt):
-        imps = cfg.get("impressoras", [])
         areas_pt = _areas_para_tipo(pt)
-        tem_area = any((i.get("area","").strip().lower() in areas_pt or i.get("printer_type","") == pt) for i in imps)
-        if tem_area:
-            msg = f"Impressora '{pt}' sem mapeamento Windows - configure na aba Impressoras"
-            ef_update_job(jid, "failed", msg)
-            _registrar_falha(jid, "sem_mapeamento_windows", msg,
-                             tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
+        # Verifica se outro agente online declara cobertura para este tipo
+        outro_cobre = any(
+            any(a.lower() in areas_pt or a.lower() == pt for a in (ag.get("covered_areas") or []))
+            for ag in _agents_online
+            if ag.get("device_name","") != DEVICE_NAME
+        )
+        if outro_cobre:
+            # Outro agente vai processar — ignora silenciosamente
+            log.info(f"[PRINT] Job {jid} tipo={pt} entregue ao agente errado — outro agente online cobre este tipo, ignorando")
         else:
-            log.info(f"[PRINT] Job {jid} tipo={pt} ignorado (este agente nao tem impressora para esse tipo)")
+            # Nenhum agente cobre — so entao marca failed para nao sumir
+            imps = cfg.get("impressoras", [])
+            tem_area = any((i.get("area","").strip().lower() in areas_pt or i.get("printer_type","") == pt) for i in imps)
+            if tem_area:
+                msg = f"Impressora '{pt}' sem mapeamento Windows - configure na aba Impressoras"
+                ef_update_job(jid, "failed", msg)
+                _registrar_falha(jid, "sem_mapeamento_windows", msg,
+                                 tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
+            else:
+                log.info(f"[PRINT] Job {jid} tipo={pt} ignorado — sem agente configurado para este tipo")
         return
     log.info(f"[PRINT] Job {jid} tipo={pt}")
     oid=content.get("order_id") or content.get("id","")
@@ -941,7 +952,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.42"
+CURRENT_VERSION = "5.43"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
