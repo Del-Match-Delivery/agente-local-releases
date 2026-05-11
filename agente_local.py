@@ -937,7 +937,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.37"
+CURRENT_VERSION = "5.38"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1771,11 +1771,33 @@ def abrir_config():
         ti.heading(col,text=lbl); ti.column(col,width=cw)
     sbi=ttk.Scrollbar(f2,orient="vertical",command=ti.yview); ti.configure(yscrollcommand=sbi.set)
     ti.grid(row=1,column=0,columnspan=5,padx=10,pady=5,sticky="nsew"); sbi.grid(row=1,column=5,pady=5,sticky="ns")
-    ti.tag_configure("sem_map",foreground="#f38ba8")
+    ti.tag_configure("sem_map", foreground="#f38ba8")
+    ti.tag_configure("outro_agente", foreground="#89b4fa")
+
+    # Áreas cobertas por outros agentes online
+    _areas_outros = set()
+    for ag in _agents_online:
+        if ag.get("device_name","") != DEVICE_NAME:
+            for a in (ag.get("covered_areas") or []):
+                _areas_outros.add(a.lower())
+
+    _mapa_tipo_area = {"receipt":"caixa","kitchen":"cozinha","bar":"bar","delivery":"delivery","pickup":"balcao"}
+
+    def _tag_impressora(imp):
+        if imp.get("nome_impressora"):
+            return ""
+        area = imp.get("area","").strip().lower()
+        ptype = imp.get("printer_type","").strip().lower()
+        area_do_tipo = _mapa_tipo_area.get(ptype, ptype)
+        if area in _areas_outros or area_do_tipo in _areas_outros:
+            return "outro_agente"
+        return "sem_map"
+
     for imp in cfg.get("impressoras",[]):
-        tag="" if imp.get("nome_impressora") else "sem_map"
+        tag = _tag_impressora(imp)
+        nome_w = imp.get("nome_impressora","") or ("(outro agente)" if tag == "outro_agente" else "")
         ti.insert("",tk.END,values=(imp.get("nome",""),imp.get("area",""),
-                                    imp.get("nome_impressora",""),imp.get("tipo","comum_win32")),tags=(tag,))
+                                    nome_w, imp.get("tipo","comum_win32")),tags=(tag,))
 
     ef2=tk.Frame(f2,bg="#2a2a3e",relief="ridge",bd=1); ef2.grid(row=2,column=0,columnspan=6,padx=10,pady=4,sticky="ew")
     tk.Label(ef2,text="Area:",bg="#2a2a3e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).grid(row=0,column=0,padx=(10,4),pady=10)
@@ -2574,11 +2596,14 @@ def iniciar_tray():
 def _check():
     try:
         cmd = _gui_queue.get_nowait()
-        if   cmd == "config":    abrir_config()
-        elif cmd == "dashboard": abrir_dashboard()
-        elif cmd == "log":       abrir_log()
-        elif cmd == "reiniciar": reiniciar_app()
-        elif cmd == "sair":      os._exit(0)
+        try:
+            if   cmd == "config":    abrir_config()
+            elif cmd == "dashboard": abrir_dashboard()
+            elif cmd == "log":       abrir_log()
+            elif cmd == "reiniciar": reiniciar_app()
+            elif cmd == "sair":      os._exit(0)
+        except Exception as e:
+            log.error(f"[GUI] Erro ao abrir '{cmd}': {e}", exc_info=True)
     except queue.Empty:
         pass
     _root.after(300, _check)

@@ -1,5 +1,5 @@
 {
-  "version": "5.37",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.37/AgenteLocal.exe",
-  "notes": "v5.37: Relatorio de falhas no dashboard (3 abas), reset automatico de jobs travados, areas derivadas do tipo quando nao configuradas, sincronizar impressoras nao apaga mapeamento manual."
+  "version": "5.38",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.38/AgenteLocal.exe",
+  "notes": "v5.38: Erros ao abrir Status agora sao logados, impressoras cobertas por outro agente aparecem em azul com (outro agente) na configuracao."
 }
