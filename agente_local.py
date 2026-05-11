@@ -777,7 +777,7 @@ def proc_job(job):
             log.info(f"[PRINT] Job {jid} tipo={pt} ignorado (este agente nao tem impressora para esse tipo)")
         return
     log.info(f"[PRINT] Job {jid} tipo={pt}")
-    oid=content.get("order_id")
+    oid=content.get("order_id") or content.get("id","")
     # Busca pedido completo apenas se o content chegou vazio (só com order_id/type/auto_print)
     # Se já tem items ou campos de layout (paper_width, receipt_font_size, etc.) usa direto
     # Considera rico apenas se items nao esta vazio (items:[] indica que o servidor nao preencheu)
@@ -850,14 +850,16 @@ def proc_job(job):
         _stats["hoje_data"] = hoje
     _stats["hoje"] += 1
     # Historico dos ultimos 50 jobs
+    # Usa oid (salvo antes de sobrescrever content) para garantir que order_id é o UUID correto
+    _oid_real = oid or (content.get("order_id","") if content else "") or (content.get("id","") if content else "")
     entrada = {
         "hora": time.strftime("%H:%M:%S"),
         "data": hoje,
         "impressora": nome_imp,
         "tipo": pt,
         "job_id": jid,
-        "order_id": content.get("order_id","") if content else "",
-        "content_ref": (content.get("order_number","") or content.get("order_id","")[:8]) if content else "",
+        "order_id": _oid_real,
+        "content_ref": (content.get("order_number","") or _oid_real[:8]) if content else "",
         "cliente": cliente,
     }
     _stats["historico"].insert(0, entrada)
@@ -883,7 +885,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.35"
+CURRENT_VERSION = "5.36"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1290,60 +1292,73 @@ def abrir_dashboard():
             # Busca o job no Supabase e reimprime
             def _do_reimp(jid=jid, job_info=job_info, nome_imp_hist=nome_imp_hist):
                 try:
-                    oid_hist = job_info.get("order_id","") or job_info.get("content_ref","")
+                    oid_hist = job_info.get("order_id","") or ""
                     pt_orig = job_info.get("tipo","receipt")
-                    # Busca pedido completo via agent-get-order
-                    resp = ef_get_order(oid_hist) if oid_hist and len(oid_hist) >= 36 else None
+                    log.info(f"[REIMP] Iniciando job_id={jid} order_id={oid_hist} tipo={pt_orig}")
+                    resp = None
+
+                    # Tenta 1: busca pedido completo pelo order_id (retorna todos os campos do pedido)
+                    if oid_hist and len(oid_hist) >= 36:
+                        r1, s1 = _post(f"{SUPABASE_URL}/functions/v1/agent-get-order",
+                                       {"order_id": oid_hist}, cfg.get("token",""))
+                        if s1 == 200 and r1:
+                            resp = r1
+                            log.info(f"[REIMP] Pedido encontrado via order_id")
+
+                    # Tenta 2: busca via job_id (retorna o content do job original)
+                    if not resp and jid and len(jid) >= 36:
+                        r2, s2 = _post(f"{SUPABASE_URL}/functions/v1/agent-get-order",
+                                       {"job_id": jid}, cfg.get("token",""))
+                        if s2 == 200 and r2:
+                            resp = r2
+                            log.info(f"[REIMP] Pedido encontrado via job_id")
+
                     if not resp:
-                        resp2, s2 = _post(
-                            f"{SUPABASE_URL}/functions/v1/agente-get-order",
-                            {"job_id": jid}, cfg.get("token","")
-                        )
-                        resp = resp2 if s2 == 200 and resp2 else None
-                    if resp:
-                        # Normaliza order_items → items
-                        if "order_items" in resp and "items" not in resp:
-                            raw_items = resp.get("order_items") or []
-                            resp["items"] = [
-                                {
-                                    "name": it.get("name_snapshot") or it.get("product_name") or it.get("name",""),
-                                    "quantity": it.get("quantity",1),
-                                    "unit_price_cents": it.get("price_cents_snapshot") or it.get("unit_price_cents",0),
-                                    "notes": it.get("notes",""),
-                                    "addons": it.get("addons_json") or it.get("addons",[]),
-                                }
-                                for it in raw_items
-                            ]
-                        # Resolve impressora: primeiro tenta pelo tipo original,
-                        # depois qualquer impressora deste PC (fallback multi-agente),
-                        # depois a do historico
-                        imp = _res_imp_por_rede(pt_orig)
-                        pt_uso = pt_orig
-                        if not imp:
-                            # Este PC nao tem impressora para o tipo original (ex: cozinha tentando reimprimir receipt)
-                            # Usa a primeira impressora disponivel neste PC com o tipo dela
-                            imps_locais = [i for i in cfg.get("impressoras",[]) if i.get("nome_impressora","").strip()]
-                            if imps_locais:
-                                i0 = imps_locais[0]
-                                imp = i0
-                                pt_uso = i0.get("printer_type","") or i0.get("area","") or pt_orig
-                                log.info(f"[REIMP] Tipo original '{pt_orig}' nao encontrado, usando impressora local '{i0.get('nome_impressora','')}' tipo='{pt_uso}'")
-                        if not imp and nome_imp_hist:
-                            imp = {"nome_impressora": nome_imp_hist, "tipo": "comum_win32"}
-                        if not imp:
-                            w.after(0, lambda: messagebox.showerror("Erro", f"Nenhuma impressora configurada neste PC", parent=w))
-                            return
-                        texto = _fmt(resp, pt_uso, pt_uso)
-                        r = _imprimir_com_roteamento(imp, texto)
-                        nome_real = imp.get("nome_impressora") or imp.get("endereco_ip","")
-                        if r.get("ok"):
-                            log.info(f"[REIMP] Job {jid} reimpresso em {nome_real}")
-                            w.after(0, lambda: messagebox.showinfo("OK", f"Reimpresso em:\n{nome_real}", parent=w))
-                        else:
-                            w.after(0, lambda: messagebox.showerror("Erro", r.get("erro",""), parent=w))
+                        log.error(f"[REIMP] Nao encontrou pedido: order_id={oid_hist} job_id={jid}")
+                        w.after(0, lambda: messagebox.showerror("Erro", "Nao foi possivel buscar o pedido.", parent=w))
+                        return
+
+                    # Normaliza order_items → items (quando veio via order_id)
+                    if "order_items" in resp and "items" not in resp:
+                        raw_items = resp.get("order_items") or []
+                        resp["items"] = [
+                            {
+                                "name": it.get("name_snapshot") or it.get("product_name") or it.get("name",""),
+                                "quantity": it.get("quantity",1),
+                                "unit_price_cents": it.get("price_cents_snapshot") or it.get("unit_price_cents",0),
+                                "notes": it.get("notes",""),
+                                "addons": it.get("addons_json") or it.get("addons",[]),
+                            }
+                            for it in raw_items
+                        ]
+
+                    # Resolve impressora: tipo original → qualquer impressora local → historico
+                    imp = _res_imp_por_rede(pt_orig)
+                    pt_uso = pt_orig
+                    if not imp:
+                        imps_locais = [i for i in cfg.get("impressoras",[]) if i.get("nome_impressora","").strip()]
+                        if imps_locais:
+                            i0 = imps_locais[0]
+                            imp = i0
+                            pt_uso = i0.get("printer_type","").strip() or i0.get("area","").strip() or pt_orig
+                            log.info(f"[REIMP] Usando impressora local '{i0.get('nome_impressora','')}' tipo='{pt_uso}'")
+                    if not imp and nome_imp_hist:
+                        imp = {"nome_impressora": nome_imp_hist, "tipo": "comum_win32"}
+                    if not imp:
+                        w.after(0, lambda: messagebox.showerror("Erro", "Nenhuma impressora configurada neste PC", parent=w))
+                        return
+
+                    texto = _fmt(resp, pt_uso, pt_uso)
+                    r = _imprimir_com_roteamento(imp, texto)
+                    nome_real = imp.get("nome_impressora") or imp.get("endereco_ip","")
+                    if r.get("ok"):
+                        log.info(f"[REIMP] OK em '{nome_real}'")
+                        w.after(0, lambda: messagebox.showinfo("OK", f"Reimpresso em:\n{nome_real}", parent=w))
                     else:
-                        w.after(0, lambda: messagebox.showerror("Erro","Nao foi possivel buscar o pedido.",parent=w))
+                        log.error(f"[REIMP] Erro ao imprimir: {r.get('erro','')}")
+                        w.after(0, lambda: messagebox.showerror("Erro", r.get("erro",""), parent=w))
                 except Exception as e:
+                    log.error(f"[REIMP] Excecao: {e}")
                     w.after(0, lambda: messagebox.showerror("Erro", str(e), parent=w))
             threading.Thread(target=_do_reimp, daemon=True).start()
 

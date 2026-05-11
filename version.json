@@ -1,5 +1,5 @@
 {
-  "version": "5.35",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.35/AgenteLocal.exe",
-  "notes": "v5.35: Corrige jobs de cozinha nao chegando (impressoras com printer_type sem area agora funcionam), log mostra cliente e numero do pedido a cada impressao, reimpressao usa impressora local do PC."
+  "version": "5.36",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.36/AgenteLocal.exe",
+  "notes": "v5.36: Reimpressao corrigida - busca pedido via job_id quando order_id nao esta disponivel. Log detalha cada tentativa para diagnostico."
 }
