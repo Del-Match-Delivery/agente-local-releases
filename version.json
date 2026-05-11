@@ -1,5 +1,5 @@
 {
-  "version": "5.38",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.38/AgenteLocal.exe",
-  "notes": "v5.38: Erros ao abrir Status agora sao logados, impressoras cobertas por outro agente aparecem em azul com (outro agente) na configuracao."
+  "version": "5.39",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.39/AgenteLocal.exe",
+  "notes": "v5.39: Botao Status/Impressoes/Falhas adicionado na janela de Configuracoes para acesso direto ao dashboard."
 }

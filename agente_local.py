@@ -937,7 +937,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.38"
+CURRENT_VERSION = "5.39"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -2445,6 +2445,8 @@ def abrir_config():
               font=("Segoe UI",10),relief="flat",padx=15,pady=12,cursor="hand2").pack(side="right",pady=8)
     tk.Button(rod,text="Log em tempo real",command=abrir_log,bg="#fab387",fg="#1e1e2e",
               font=("Segoe UI",10,"bold"),relief="flat",padx=15,pady=12,cursor="hand2").pack(side="left",padx=10,pady=8)
+    tk.Button(rod,text="Status / Impressoes / Falhas",command=abrir_dashboard,bg="#a6e3a1",fg="#1e1e2e",
+              font=("Segoe UI",10,"bold"),relief="flat",padx=15,pady=12,cursor="hand2").pack(side="left",padx=4,pady=8)
 
 def reiniciar_app():
     log.info("Reiniciando agente...")
