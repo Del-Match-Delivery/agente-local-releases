@@ -1,5 +1,5 @@
 {
-  "version": "5.36",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.36/AgenteLocal.exe",
-  "notes": "v5.36: Reimpressao corrigida - busca pedido via job_id quando order_id nao esta disponivel. Log detalha cada tentativa para diagnostico."
+  "version": "5.37",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.37/AgenteLocal.exe",
+  "notes": "v5.37: Relatorio de falhas no dashboard (3 abas), reset automatico de jobs travados, areas derivadas do tipo quando nao configuradas, sincronizar impressoras nao apaga mapeamento manual."
 }

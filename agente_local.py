@@ -54,8 +54,30 @@ _stats = {
     "ultimo_job": None,
     "ultimo_erro": None,
     "ultima_impressora": "",
-    "historico": [],  # lista dos ultimos 50 jobs
+    "historico": [],   # lista dos ultimos 50 jobs impressos com sucesso
+    "falhas": [],      # lista das ultimas 100 falhas com causa, tipo, pedido, hora
+    "alertas": [],     # alertas ativos (ex: impressora sem mapeamento, jobs stuck)
 }
+
+def _registrar_falha(job_id, causa, detalhe, tipo="", pedido="", cliente="", impressora=""):
+    """Registra uma falha no historico de diagnostico. Thread-safe via append."""
+    entrada = {
+        "hora": time.strftime("%H:%M:%S"),
+        "data": time.strftime("%d/%m/%Y"),
+        "job_id": job_id or "",
+        "causa": causa,
+        "detalhe": detalhe,
+        "tipo": tipo,
+        "pedido": pedido,
+        "cliente": cliente,
+        "impressora": impressora,
+    }
+    _stats["falhas"].insert(0, entrada)
+    if len(_stats["falhas"]) > 100:
+        _stats["falhas"] = _stats["falhas"][:100]
+    _stats["erros"] += 1
+    _stats["ultimo_erro"] = detalhe[:120]
+    log.error(f"[FALHA] {causa} | job={job_id} | {detalhe}")
 
 def carregar_config():
     if CONFIG_PATH.exists():
@@ -283,7 +305,14 @@ def ef_update_job(jid, sv, em=None, pa=None):
     if em: d["error_message"]=em
     if pa: d["printed_at"]=pa
     _,s=_post(f"{SUPABASE_URL}/functions/v1/print-job-status",d,cfg.get("token",""))
-    return s in (200,204)
+    ok = s in (200,204)
+    if not ok and sv == "printed":
+        # Falha ao marcar como printed: job pode ser reprocessado e impresso de novo
+        log.warning(f"[STATUS] Falha ao marcar job {jid} como printed (HTTP {s}) — pode reimprimir!")
+        _registrar_falha(jid, "status_update_failed",
+                         f"Job impresso localmente mas nao atualizado no servidor (HTTP {s}). Pode ser reimpresso automaticamente.",
+                         tipo="status")
+    return ok
 
 
 def autoconfigurar(token):
@@ -347,7 +376,16 @@ def sincronizar_impressoras():
                 match = _auto_match(ns)
                 imps_novos.append({"nome":ns,"area":area_servidor,"printer_type":ts,"nome_impressora":match,"tipo":"comum_win32","modo":"texto"})
 
-        if str(imps_novos) != str(cfg.get("impressoras",[])):
+        # Seguranca: nunca salvar se alguma impressora nova perdeu nome_impressora que a atual tinha
+        imps_atuais_todos = cfg.get("impressoras", [])
+        for imp_novo in imps_novos:
+            chave = imp_novo.get("nome","").strip().lower()
+            atual = imps_atuais_nome.get(chave) or imps_atuais_area.get(imp_novo.get("area","").strip().lower())
+            if atual and atual.get("nome_impressora","").strip() and not imp_novo.get("nome_impressora","").strip():
+                imp_novo["nome_impressora"] = atual["nome_impressora"]
+                log.warning(f"[SYNC] Protegeu nome_impressora='{atual['nome_impressora']}' de '{imp_novo.get('nome','')}' contra sobrescrita")
+
+        if str(imps_novos) != str(imps_atuais_todos):
             cfg["impressoras"] = imps_novos
             salvar_config(cfg)
             log.info(f"[SYNC] Impressoras atualizadas: {[i.get('nome') for i in imps_novos]}")
@@ -763,31 +801,31 @@ def proc_job(job):
     jid=job.get("id"); pt=job.get("printer_type","receipt")
     pid=job.get("printer_id")
     content=job.get("content",{}); copies=int(job.get("copies",1)); jt=job.get("job_type","order")
+    # Extrai pedido/cliente do content para usar em logs e registros de falha
+    _pedido_ref = content.get("order_number","") or content.get("order_id","")[:8] if content else ""
+    _cliente_ref = content.get("customer_name","") if content else ""
+
     # Se agente nao tem impressora para este tipo, marca failed no servidor para nao ficar em loop
     if not _agente_cobre_tipo(pt):
         imps = cfg.get("impressoras", [])
         areas_pt = _areas_para_tipo(pt)
-        # Verifica se tem impressora sem nome mapeado (config incompleta) vs nao e agente deste tipo
         tem_area = any((i.get("area","").strip().lower() in areas_pt or i.get("printer_type","") == pt) for i in imps)
         if tem_area:
-            # Impressora existe na config mas nome_impressora esta vazio - marca failed para parar o loop
-            log.error(f"[PRINT] Job {jid} tipo={pt}: impressora sem nome_impressora mapeado - configure na aba Impressoras!")
-            ef_update_job(jid, "failed", f"Impressora '{pt}' sem mapeamento Windows - configure na aba Impressoras")
+            msg = f"Impressora '{pt}' sem mapeamento Windows - configure na aba Impressoras"
+            ef_update_job(jid, "failed", msg)
+            _registrar_falha(jid, "sem_mapeamento_windows", msg,
+                             tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
         else:
             log.info(f"[PRINT] Job {jid} tipo={pt} ignorado (este agente nao tem impressora para esse tipo)")
         return
     log.info(f"[PRINT] Job {jid} tipo={pt}")
     oid=content.get("order_id") or content.get("id","")
-    # Busca pedido completo apenas se o content chegou vazio (só com order_id/type/auto_print)
-    # Se já tem items ou campos de layout (paper_width, receipt_font_size, etc.) usa direto
-    # Considera rico apenas se items nao esta vazio (items:[] indica que o servidor nao preencheu)
     _content_rico = (("items" in content and len(content.get("items") or []) > 0)
                      or "paper_width" in content or "receipt_font_size" in content or "company_name" in content)
     if oid and not _content_rico:
         p=ef_get_order(oid)
         if p:
             content=p
-            # Normaliza: banco retorna order_items, _fmt espera items
             if "order_items" in content and "items" not in content:
                 raw_items = content.get("order_items") or []
                 content["items"] = [
@@ -800,13 +838,26 @@ def proc_job(job):
                     }
                     for it in raw_items
                 ]
+            # Atualiza referencia de pedido/cliente apos buscar dados completos
+            _pedido_ref = content.get("order_number","") or oid[:8]
+            _cliente_ref = content.get("customer_name","") or _cliente_ref
             log.info("[ORDER] OK")
-        else: log.error(f"[ORDER] Falha {oid}")
+        else:
+            log.error(f"[ORDER] Falha {oid}")
+            _registrar_falha(jid, "falha_buscar_pedido",
+                             f"Nao foi possivel buscar dados do pedido {oid} no servidor",
+                             tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
 
     # Resolve impressora com suporte a multi-rede
     imp = _res_imp_por_rede(pt, printer_id=pid)
     if not imp:
-        ef_update_job(jid,"failed",f"Sem impressora para '{pt}'"); return
+        msg = f"Sem impressora configurada para tipo '{pt}'"
+        ef_update_job(jid,"failed", msg)
+        _registrar_falha(jid, "impressora_nao_encontrada", msg,
+                         tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
+        return
+
+    nome_imp_local = imp.get("nome_impressora") or imp.get("endereco_ip","")
 
     # PRIORIDADE: Usa dados formatados do servidor (ESC/POS RAW) se existirem
     escpos_b64 = job.get("escpos_data")
@@ -814,26 +865,27 @@ def proc_job(job):
         import base64
         try:
             dados_brutos = base64.b64decode(escpos_b64)
-            log.info(f"[PRINT] Usando layout do sistema (RAW) para Job {jid}")
+            log.info(f"[PRINT] Usando layout RAW para Job {jid}")
             for _ in range(copies):
                 r = _imprimir_com_roteamento(imp, dados_brutos)
                 if not r.get("ok"):
-                    _stats["erros"] += 1
-                    _stats["ultimo_erro"] = r.get("erro","")
                     ef_update_job(jid, "failed", r.get("erro",""))
+                    _registrar_falha(jid, "erro_impressora", r.get("erro",""),
+                                     tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref,
+                                     impressora=nome_imp_local)
                     return
         except Exception as e:
-            log.error(f"[PRINT] Erro ao decodificar ESC/POS do sistema: {e}")
-            # Se falhou, tenta o layout local abaixo
+            log.error(f"[PRINT] Erro ao decodificar ESC/POS: {e}")
     else:
-        # FALLBACK: Layout antigo/local (se o servidor nao mandou escpos_data)
         texto=_fmt(content,jt,pt)
         for _ in range(copies):
             r=_imprimir_com_roteamento(imp, texto)
             if not r.get("ok"):
-                _stats["erros"] += 1
-                _stats["ultimo_erro"] = r.get("erro","")
-                ef_update_job(jid,"failed",r.get("erro","")); return
+                ef_update_job(jid,"failed",r.get("erro",""))
+                _registrar_falha(jid, "erro_impressora", r.get("erro",""),
+                                 tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref,
+                                 impressora=nome_imp_local)
+                return
                 
     ef_update_job(jid,"printed",pa=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()))
     nome_imp = imp.get("nome_impressora") or imp.get("endereco_ip","")
@@ -885,7 +937,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.36"
+CURRENT_VERSION = "5.37"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -982,27 +1034,68 @@ async def checar_atualizacao():
     except Exception as e:
         log.debug(f"[UPDATE] {e}")
 
+def _reset_jobs_failed_servidor():
+    """Reseta jobs failed recentes (ultimas 2h) de volta para pending no servidor.
+    Cobre qualquer tipo de erro, nao so 'sem mapeamento Windows'.
+    Roda a cada 10 minutos para recuperar automaticamente jobs perdidos."""
+    imps = cfg.get("impressoras", [])
+    areas_set = set()
+    for i in imps:
+        if not i.get("nome_impressora","").strip():
+            continue
+        area = i.get("area","").strip().lower()
+        ptype = i.get("printer_type","").strip().lower()
+        if area:
+            areas_set.add(area)
+        elif ptype:
+            mapa_tipo_area = {"receipt":"caixa","kitchen":"cozinha","bar":"bar","delivery":"delivery","pickup":"balcao"}
+            areas_set.add(mapa_tipo_area.get(ptype, ptype))
+    if not areas_set:
+        return
+    token = cfg.get("token","")
+    if not token:
+        return
+    try:
+        payload = {
+            "action": "reset_failed",
+            "areas": list(areas_set),
+            "device_fingerprint": DEVICE_FINGERPRINT,
+            "minutes": 120,
+        }
+        resp, s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, token, timeout=15)
+        if s == 200 and resp:
+            n = resp.get("reset_count", 0)
+            if n:
+                log.info(f"[RESET] {n} job(s) failed resetados para pending automaticamente")
+                _stats["alertas"] = [a for a in _stats["alertas"] if a.get("tipo") != "jobs_stuck"]
+    except Exception as e:
+        log.debug(f"[RESET] {e}")
+
 async def loop_poll():
-    iv=int(cfg.get("poll_interval",3))
+    iv = max(1, int(cfg.get("poll_interval", 3)))
     log.info(f"[POLL] Iniciando a cada {iv}s")
     ciclos = 0
     ultimo_update_check = 0
-    # Verifica atualizacao logo no inicio
+    ultimo_reset_failed = 0
     await checar_atualizacao()
     while True:
         try: poll()
         except Exception as e: log.error(f"[POLL] {e}")
         ciclos += 1
         # Re-sincroniza impressoras do servidor a cada 5 minutos
-        if ciclos % max(1, int(300 / max(iv,1))) == 0:
+        if ciclos % max(1, int(300 / iv)) == 0:
             try: sincronizar_impressoras()
             except Exception as e: log.error(f"[SYNC] {e}")
-        # Verifica atualizacao a cada 5 minutos
         agora = time.time()
+        # Verifica atualizacao a cada 5 minutos
         if agora - ultimo_update_check >= 300:
             ultimo_update_check = agora
             try: await checar_atualizacao()
             except Exception as e: log.debug(f"[UPDATE] {e}")
+        # Reseta jobs failed a cada 10 minutos
+        if agora - ultimo_reset_failed >= 600:
+            ultimo_reset_failed = agora
+            threading.Thread(target=_reset_jobs_failed_servidor, daemon=True).start()
         await asyncio.sleep(iv)
 
 
@@ -1123,91 +1216,29 @@ def abrir_boasvindas():
 def abrir_dashboard():
     w = tk.Toplevel(_root)
     w.title("Status - Concentrador")
-    w.geometry("400x480")
+    w.geometry("820x620")
     w.configure(bg="#1a1a2e")
-    w.resizable(False, False)
+    w.resizable(True, True)
     w.lift(); w.focus_force()
 
-    tk.Label(w, text="Concentrador de Impressoes",
-             bg="#1a1a2e", fg="#cdd6f4", font=("Segoe UI",13,"bold")).pack(pady=(20,2))
-    tk.Label(w, text="e Dispositivos", bg="#1a1a2e", fg="#cdd6f4",
-             font=("Segoe UI",13,"bold")).pack()
+    tk.Label(w, text="Concentrador de Impressoes e Dispositivos",
+             bg="#1a1a2e", fg="#cdd6f4", font=("Segoe UI",13,"bold")).pack(pady=(14,4))
 
-    # Cards de stats
-    cards_frame = tk.Frame(w, bg="#1a1a2e"); cards_frame.pack(fill="x", padx=20, pady=16)
-    cards_frame.columnconfigure(0, weight=1); cards_frame.columnconfigure(1, weight=1)
-
-    def make_card(parent, row, col, label, value_var, cor):
-        f = tk.Frame(parent, bg="#25253a", padx=14, pady=12)
-        f.grid(row=row, column=col, padx=5, pady=5, sticky="nsew")
-        tk.Label(f, text=label, bg="#25253a", fg="#6c7086", font=("Segoe UI",9)).pack(anchor="w")
-        tk.Label(f, textvariable=value_var, bg="#25253a", fg=cor,
-                 font=("Segoe UI",20,"bold")).pack(anchor="w", pady=(2,0))
-        return f
-
-    v_total  = tk.StringVar(value="0")
-    v_hoje   = tk.StringVar(value="0")
-    v_erros  = tk.StringVar(value="0")
-    v_uptime = tk.StringVar(value="0m")
-    v_status = tk.StringVar(value="Ativo")
-
-    make_card(cards_frame, 0, 0, "Total impressos",  v_total,  "#a6e3a1")
-    make_card(cards_frame, 0, 1, "Hoje",             v_hoje,   "#89b4fa")
-    make_card(cards_frame, 1, 0, "Erros",            v_erros,  "#f38ba8")
-    make_card(cards_frame, 1, 1, "Uptime",           v_uptime, "#cba6f7")
-
-    # Ultimo job
-    uf = tk.Frame(w, bg="#25253a", padx=16, pady=12); uf.pack(fill="x", padx=20, pady=(0,8))
-    tk.Label(uf, text="Ultimo job impresso", bg="#25253a", fg="#6c7086",
-             font=("Segoe UI",9)).pack(anchor="w")
-    v_ujob = tk.StringVar(value="Nenhum ainda")
-    tk.Label(uf, textvariable=v_ujob, bg="#25253a", fg="#cdd6f4",
-             font=("Segoe UI",10)).pack(anchor="w", pady=(2,0))
-    v_uimp = tk.StringVar(value="")
-    tk.Label(uf, textvariable=v_uimp, bg="#25253a", fg="#6c7086",
-             font=("Segoe UI",9)).pack(anchor="w")
-
-    # Ultimo erro
-    ef2 = tk.Frame(w, bg="#25253a", padx=16, pady=12); ef2.pack(fill="x", padx=20, pady=(0,8))
-    tk.Label(ef2, text="Ultimo erro", bg="#25253a", fg="#6c7086",
-             font=("Segoe UI",9)).pack(anchor="w")
-    v_uerr = tk.StringVar(value="Nenhum")
-    tk.Label(ef2, textvariable=v_uerr, bg="#25253a", fg="#f38ba8",
-             font=("Segoe UI",9), wraplength=340, justify="left").pack(anchor="w", pady=(2,0))
-
-    # Painel de balancas
-    pf = tk.Frame(w, bg="#25253a", padx=16, pady=10); pf.pack(fill="x", padx=20, pady=(0,8))
-    tk.Label(pf, text="Balancas em tempo real", bg="#25253a", fg="#6c7086", font=("Segoe UI",9)).pack(anchor="w")
-    pesos_frame = tk.Frame(pf, bg="#25253a"); pesos_frame.pack(fill="x", pady=(6,0))
-
-    def atualizar_pesos():
-        if not w.winfo_exists(): return
-        for wid in pesos_frame.winfo_children(): wid.destroy()
-        if not _pesos_atuais:
-            tk.Label(pesos_frame, text="Nenhuma balanca conectada", bg="#25253a", fg="#45475a", font=("Segoe UI",9)).pack(anchor="w")
-        else:
-            for nome_b, info in _pesos_atuais.items():
-                row = tk.Frame(pesos_frame, bg="#25253a"); row.pack(fill="x", pady=2)
-                cor = "#a6e3a1" if info["status"] == "ok" else "#f38ba8"
-                tk.Label(row, text=f"{nome_b}:", bg="#25253a", fg="#cdd6f4", font=("Segoe UI",9,"bold"), width=18, anchor="w").pack(side="left")
-                tk.Label(row, text=f"{info['peso']:.3f} kg", bg="#25253a", fg=cor, font=("Segoe UI",13,"bold")).pack(side="left", padx=8)
-                tk.Label(row, text=info["hora"], bg="#25253a", fg="#45475a", font=("Segoe UI",8)).pack(side="left")
-        w.after(500, atualizar_pesos)
-    atualizar_pesos()
-
-    # Botoes
-    bf = tk.Frame(w, bg="#1a1a2e"); bf.pack(fill="x", padx=20, pady=8)
+    # Barra de botoes no topo
+    bf = tk.Frame(w, bg="#1a1a2e"); bf.pack(fill="x", padx=20, pady=(0,6))
     tk.Button(bf, text="Configuracoes", command=abrir_config,
               bg="#313244", fg="#cdd6f4", font=("Segoe UI",9,"bold"),
-              relief="flat", padx=12, pady=6, cursor="hand2").pack(side="left", padx=4)
+              relief="flat", padx=12, pady=5, cursor="hand2").pack(side="left", padx=4)
     tk.Button(bf, text="Ver Log", command=abrir_log,
               bg="#313244", fg="#cdd6f4", font=("Segoe UI",9,"bold"),
-              relief="flat", padx=12, pady=6, cursor="hand2").pack(side="left", padx=4)
-
+              relief="flat", padx=12, pady=5, cursor="hand2").pack(side="left", padx=4)
     btn_upd = tk.Button(bf, text="Atualizar Sistema",
                         bg="#a6e3a1", fg="#1e1e2e", font=("Segoe UI",9,"bold"),
-                        relief="flat", padx=12, pady=6, cursor="hand2")
+                        relief="flat", padx=12, pady=5, cursor="hand2")
     btn_upd.pack(side="left", padx=4)
+    tk.Button(bf, text="Fechar", command=w.destroy,
+              bg="#313244", fg="#cdd6f4", font=("Segoe UI",9,"bold"),
+              relief="flat", padx=12, pady=5, cursor="hand2").pack(side="right", padx=4)
 
     def verificar_atualizacao_manual():
         btn_upd.config(text="Verificando...", state="disabled", bg="#89b4fa")
@@ -1216,21 +1247,16 @@ def abrir_dashboard():
                 req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
                 with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx()) as r:
                     info = json.loads(r.read())
-                nova = info.get("version", "")
-                url_nova = info.get("url", "")
+                nova = info.get("version",""); url_nova = info.get("url","")
                 if not nova or not url_nova:
                     w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
-                                        messagebox.showwarning("Aviso", "Nao foi possivel verificar atualizacao.", parent=w)))
-                    return
+                                        messagebox.showwarning("Aviso","Nao foi possivel verificar atualizacao.",parent=w))); return
                 if nova == CURRENT_VERSION:
                     w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
-                                        messagebox.showinfo("Atualizado", f"Voce ja esta na versao mais recente (v{CURRENT_VERSION}).", parent=w)))
-                    return
-                # Ha versao nova
+                                        messagebox.showinfo("Atualizado",f"Voce ja esta na versao mais recente (v{CURRENT_VERSION}).",parent=w))); return
                 def _confirmar():
-                    if not messagebox.askyesno("Atualizar", f"Nova versao v{nova} disponivel!\nDeseja atualizar agora?", parent=w):
-                        btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1")
-                        return
+                    if not messagebox.askyesno("Atualizar",f"Nova versao v{nova} disponivel!\nDeseja atualizar agora?",parent=w):
+                        btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"); return
                     btn_upd.config(text="Baixando...", bg="#f9e2af")
                     def _baixar():
                         try:
@@ -1241,38 +1267,93 @@ def abrir_dashboard():
                             del_extra2 = f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else ""
                             bat = BASE_DIR / "update_apply.bat"
                             bat.write_text(_bat_update(exe_novo, exe_destino, del_extra2), encoding="utf-8")
-                            subprocess.Popen(["cmd", "/c", str(bat)], creationflags=subprocess.CREATE_NO_WINDOW)
+                            subprocess.Popen(["cmd","/c",str(bat)], creationflags=subprocess.CREATE_NO_WINDOW)
                             log.info(f"[UPDATE] Atualizando para v{nova} via botao manual")
-                            w.after(0, lambda: messagebox.showinfo("Atualizando", f"Atualizando para v{nova}...\nO agente vai reiniciar automaticamente.", parent=w))
+                            w.after(0, lambda: messagebox.showinfo("Atualizando",f"Atualizando para v{nova}...\nO agente vai reiniciar automaticamente.",parent=w))
                             w.after(500, sys.exit)
                         except Exception as e:
                             w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
-                                                messagebox.showerror("Erro", f"Falha ao baixar atualizacao:\n{e}", parent=w)))
+                                                messagebox.showerror("Erro",f"Falha ao baixar:\n{e}",parent=w)))
                     threading.Thread(target=_baixar, daemon=True).start()
                 w.after(0, _confirmar)
             except Exception as e:
                 w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
-                                    messagebox.showerror("Erro", f"Falha ao verificar atualizacao:\n{e}", parent=w)))
+                                    messagebox.showerror("Erro",f"Falha ao verificar:\n{e}",parent=w)))
         threading.Thread(target=_run, daemon=True).start()
-
     btn_upd.config(command=verificar_atualizacao_manual)
 
-    tk.Button(bf, text="Fechar", command=w.destroy,
-              bg="#313244", fg="#cdd6f4", font=("Segoe UI",9,"bold"),
-              relief="flat", padx=12, pady=6, cursor="hand2").pack(side="right", padx=4)
+    # Notebook com abas
+    nb = ttk.Notebook(w)
+    nb.pack(fill="both", expand=True, padx=12, pady=(0,12))
 
-    # Historico de jobs
-    hf = tk.Frame(w, bg="#25253a", padx=16, pady=12); hf.pack(fill="x", padx=20, pady=(0,8))
-    tk.Label(hf, text="Historico de impressoes", bg="#25253a", fg="#6c7086",
-             font=("Segoe UI",9)).pack(anchor="w")
-    hist_frame = tk.Frame(hf, bg="#25253a"); hist_frame.pack(fill="x", pady=(6,0))
+    # ── ABA 1: STATUS ──────────────────────────────────────────────
+    tab_status = tk.Frame(nb, bg="#1a1a2e"); nb.add(tab_status, text="  Status  ")
 
-    cols_h = ("hora","tipo","impressora","pedido")
-    tree_h = ttk.Treeview(hist_frame, columns=cols_h, show="headings", height=6)
-    tree_h.heading("hora",      text="Hora");      tree_h.column("hora",      width=70)
-    tree_h.heading("tipo",      text="Tipo");      tree_h.column("tipo",      width=70)
-    tree_h.heading("impressora",text="Impressora");tree_h.column("impressora",width=160)
-    tree_h.heading("pedido",    text="Pedido");    tree_h.column("pedido",    width=80)
+    cards_frame = tk.Frame(tab_status, bg="#1a1a2e"); cards_frame.pack(fill="x", padx=16, pady=12)
+    cards_frame.columnconfigure(0,weight=1); cards_frame.columnconfigure(1,weight=1)
+    cards_frame.columnconfigure(2,weight=1); cards_frame.columnconfigure(3,weight=1)
+
+    def make_card(parent, col, label, value_var, cor):
+        f = tk.Frame(parent, bg="#25253a", padx=12, pady=10)
+        f.grid(row=0, column=col, padx=5, pady=5, sticky="nsew")
+        tk.Label(f, text=label, bg="#25253a", fg="#6c7086", font=("Segoe UI",9)).pack(anchor="w")
+        tk.Label(f, textvariable=value_var, bg="#25253a", fg=cor, font=("Segoe UI",22,"bold")).pack(anchor="w")
+
+    v_total = tk.StringVar(value="0"); v_hoje = tk.StringVar(value="0")
+    v_erros = tk.StringVar(value="0"); v_uptime = tk.StringVar(value="0m")
+    make_card(cards_frame, 0, "Total impressos", v_total,  "#a6e3a1")
+    make_card(cards_frame, 1, "Hoje",            v_hoje,   "#89b4fa")
+    make_card(cards_frame, 2, "Falhas",          v_erros,  "#f38ba8")
+    make_card(cards_frame, 3, "Uptime",          v_uptime, "#cba6f7")
+
+    # Ultimo job / ultimo erro
+    info_f = tk.Frame(tab_status, bg="#1a1a2e"); info_f.pack(fill="x", padx=16, pady=(0,8))
+    info_f.columnconfigure(0,weight=1); info_f.columnconfigure(1,weight=1)
+    uf = tk.Frame(info_f, bg="#25253a", padx=14, pady=10); uf.grid(row=0,column=0,padx=(0,4),sticky="nsew")
+    tk.Label(uf, text="Ultimo job impresso", bg="#25253a", fg="#6c7086", font=("Segoe UI",9)).pack(anchor="w")
+    v_ujob = tk.StringVar(value="Nenhum ainda"); v_uimp = tk.StringVar(value="")
+    tk.Label(uf, textvariable=v_ujob, bg="#25253a", fg="#cdd6f4", font=("Segoe UI",10)).pack(anchor="w")
+    tk.Label(uf, textvariable=v_uimp, bg="#25253a", fg="#6c7086", font=("Segoe UI",9)).pack(anchor="w")
+    ef2 = tk.Frame(info_f, bg="#25253a", padx=14, pady=10); ef2.grid(row=0,column=1,padx=(4,0),sticky="nsew")
+    tk.Label(ef2, text="Ultimo erro", bg="#25253a", fg="#6c7086", font=("Segoe UI",9)).pack(anchor="w")
+    v_uerr = tk.StringVar(value="Nenhum")
+    tk.Label(ef2, textvariable=v_uerr, bg="#25253a", fg="#f38ba8",
+             font=("Segoe UI",9), wraplength=340, justify="left").pack(anchor="w")
+
+    # Balancas
+    pf = tk.Frame(tab_status, bg="#25253a", padx=14, pady=8); pf.pack(fill="x", padx=16, pady=(0,8))
+    tk.Label(pf, text="Balancas em tempo real", bg="#25253a", fg="#6c7086", font=("Segoe UI",9)).pack(anchor="w")
+    pesos_frame = tk.Frame(pf, bg="#25253a"); pesos_frame.pack(fill="x", pady=(4,0))
+    def atualizar_pesos():
+        if not w.winfo_exists(): return
+        for wid in pesos_frame.winfo_children(): wid.destroy()
+        if not _pesos_atuais:
+            tk.Label(pesos_frame, text="Nenhuma balanca conectada", bg="#25253a", fg="#45475a", font=("Segoe UI",9)).pack(anchor="w")
+        else:
+            for nome_b, info_b in _pesos_atuais.items():
+                row2 = tk.Frame(pesos_frame, bg="#25253a"); row2.pack(fill="x", pady=1)
+                cor = "#a6e3a1" if info_b["status"]=="ok" else "#f38ba8"
+                tk.Label(row2, text=f"{nome_b}:", bg="#25253a", fg="#cdd6f4", font=("Segoe UI",9,"bold"), width=18, anchor="w").pack(side="left")
+                tk.Label(row2, text=f"{info_b['peso']:.3f} kg", bg="#25253a", fg=cor, font=("Segoe UI",13,"bold")).pack(side="left", padx=6)
+                tk.Label(row2, text=info_b["hora"], bg="#25253a", fg="#45475a", font=("Segoe UI",8)).pack(side="left")
+        w.after(500, atualizar_pesos)
+    atualizar_pesos()
+
+    # ── ABA 2: IMPRESSOES (historico de sucesso) ──────────────────
+    tab_hist = tk.Frame(nb, bg="#1a1a2e"); nb.add(tab_hist, text="  Impressoes  ")
+
+    hdr_f = tk.Frame(tab_hist, bg="#1a1a2e"); hdr_f.pack(fill="x", padx=12, pady=(10,4))
+    tk.Label(hdr_f, text="Ultimas 50 impressoes com sucesso",
+             bg="#1a1a2e", fg="#6c7086", font=("Segoe UI",9)).pack(side="left")
+
+    hist_frame = tk.Frame(tab_hist, bg="#1a1a2e"); hist_frame.pack(fill="both", expand=True, padx=12, pady=(0,4))
+    cols_h = ("hora","tipo","impressora","pedido","cliente")
+    tree_h = ttk.Treeview(hist_frame, columns=cols_h, show="headings", height=16)
+    tree_h.heading("hora",      text="Hora");       tree_h.column("hora",       width=65,  minwidth=55)
+    tree_h.heading("tipo",      text="Tipo");       tree_h.column("tipo",       width=75,  minwidth=60)
+    tree_h.heading("impressora",text="Impressora"); tree_h.column("impressora", width=180, minwidth=100)
+    tree_h.heading("pedido",    text="Pedido");     tree_h.column("pedido",     width=80,  minwidth=60)
+    tree_h.heading("cliente",   text="Cliente");    tree_h.column("cliente",    width=160, minwidth=80)
     sb_h = ttk.Scrollbar(hist_frame, orient="vertical", command=tree_h.yview)
     tree_h.configure(yscrollcommand=sb_h.set)
     tree_h.pack(side="left", fill="both", expand=True)
@@ -1280,117 +1361,155 @@ def abrir_dashboard():
 
     def reimprimir():
         sel = tree_h.selection()
-        if not sel:
-            messagebox.showwarning("Aviso","Selecione um job na lista!",parent=w)
-            return
-        vals = tree_h.item(sel[0],"values")
+        if not sel: messagebox.showwarning("Aviso","Selecione um job na lista!",parent=w); return
         idx = tree_h.index(sel[0])
-        if idx < len(_stats["historico"]):
-            job_info = _stats["historico"][idx]
-            jid = job_info.get("job_id","")
-            nome_imp_hist = job_info.get("impressora","")
-            # Busca o job no Supabase e reimprime
-            def _do_reimp(jid=jid, job_info=job_info, nome_imp_hist=nome_imp_hist):
-                try:
-                    oid_hist = job_info.get("order_id","") or ""
-                    pt_orig = job_info.get("tipo","receipt")
-                    log.info(f"[REIMP] Iniciando job_id={jid} order_id={oid_hist} tipo={pt_orig}")
-                    resp = None
+        if idx >= len(_stats["historico"]): return
+        job_info = _stats["historico"][idx]
+        jid = job_info.get("job_id",""); nome_imp_hist = job_info.get("impressora","")
+        def _do_reimp(jid=jid, job_info=job_info, nome_imp_hist=nome_imp_hist):
+            try:
+                oid_hist = job_info.get("order_id","") or ""
+                pt_orig = job_info.get("tipo","receipt")
+                log.info(f"[REIMP] Iniciando job_id={jid} order_id={oid_hist} tipo={pt_orig}")
+                resp = None
+                if oid_hist and len(oid_hist) >= 36:
+                    r1, s1 = _post(f"{SUPABASE_URL}/functions/v1/agent-get-order", {"order_id": oid_hist}, cfg.get("token",""))
+                    if s1 == 200 and r1: resp = r1; log.info("[REIMP] via order_id")
+                if not resp and jid and len(jid) >= 36:
+                    r2, s2 = _post(f"{SUPABASE_URL}/functions/v1/agent-get-order", {"job_id": jid}, cfg.get("token",""))
+                    if s2 == 200 and r2: resp = r2; log.info("[REIMP] via job_id")
+                if not resp:
+                    log.error(f"[REIMP] Nao encontrou pedido: order_id={oid_hist} job_id={jid}")
+                    w.after(0, lambda: messagebox.showerror("Erro","Nao foi possivel buscar o pedido.",parent=w)); return
+                if "order_items" in resp and "items" not in resp:
+                    raw_items = resp.get("order_items") or []
+                    resp["items"] = [{"name": it.get("name_snapshot") or it.get("product_name") or it.get("name",""),
+                                      "quantity": it.get("quantity",1), "unit_price_cents": it.get("price_cents_snapshot") or it.get("unit_price_cents",0),
+                                      "notes": it.get("notes",""), "addons": it.get("addons_json") or it.get("addons",[])} for it in raw_items]
+                imp = _res_imp_por_rede(pt_orig); pt_uso = pt_orig
+                if not imp:
+                    imps_locais = [i for i in cfg.get("impressoras",[]) if i.get("nome_impressora","").strip()]
+                    if imps_locais:
+                        i0 = imps_locais[0]; imp = i0
+                        pt_uso = i0.get("printer_type","").strip() or i0.get("area","").strip() or pt_orig
+                if not imp and nome_imp_hist: imp = {"nome_impressora": nome_imp_hist, "tipo": "comum_win32"}
+                if not imp:
+                    w.after(0, lambda: messagebox.showerror("Erro","Nenhuma impressora configurada neste PC",parent=w)); return
+                texto = _fmt(resp, pt_uso, pt_uso)
+                r = _imprimir_com_roteamento(imp, texto)
+                nome_real = imp.get("nome_impressora") or imp.get("endereco_ip","")
+                if r.get("ok"):
+                    log.info(f"[REIMP] OK em '{nome_real}'")
+                    w.after(0, lambda: messagebox.showinfo("OK",f"Reimpresso em:\n{nome_real}",parent=w))
+                else:
+                    log.error(f"[REIMP] Erro: {r.get('erro','')}")
+                    w.after(0, lambda: messagebox.showerror("Erro",r.get("erro",""),parent=w))
+            except Exception as e:
+                log.error(f"[REIMP] Excecao: {e}")
+                w.after(0, lambda: messagebox.showerror("Erro",str(e),parent=w))
+        threading.Thread(target=_do_reimp, daemon=True).start()
 
-                    # Tenta 1: busca pedido completo pelo order_id (retorna todos os campos do pedido)
-                    if oid_hist and len(oid_hist) >= 36:
-                        r1, s1 = _post(f"{SUPABASE_URL}/functions/v1/agent-get-order",
-                                       {"order_id": oid_hist}, cfg.get("token",""))
-                        if s1 == 200 and r1:
-                            resp = r1
-                            log.info(f"[REIMP] Pedido encontrado via order_id")
-
-                    # Tenta 2: busca via job_id (retorna o content do job original)
-                    if not resp and jid and len(jid) >= 36:
-                        r2, s2 = _post(f"{SUPABASE_URL}/functions/v1/agent-get-order",
-                                       {"job_id": jid}, cfg.get("token",""))
-                        if s2 == 200 and r2:
-                            resp = r2
-                            log.info(f"[REIMP] Pedido encontrado via job_id")
-
-                    if not resp:
-                        log.error(f"[REIMP] Nao encontrou pedido: order_id={oid_hist} job_id={jid}")
-                        w.after(0, lambda: messagebox.showerror("Erro", "Nao foi possivel buscar o pedido.", parent=w))
-                        return
-
-                    # Normaliza order_items → items (quando veio via order_id)
-                    if "order_items" in resp and "items" not in resp:
-                        raw_items = resp.get("order_items") or []
-                        resp["items"] = [
-                            {
-                                "name": it.get("name_snapshot") or it.get("product_name") or it.get("name",""),
-                                "quantity": it.get("quantity",1),
-                                "unit_price_cents": it.get("price_cents_snapshot") or it.get("unit_price_cents",0),
-                                "notes": it.get("notes",""),
-                                "addons": it.get("addons_json") or it.get("addons",[]),
-                            }
-                            for it in raw_items
-                        ]
-
-                    # Resolve impressora: tipo original → qualquer impressora local → historico
-                    imp = _res_imp_por_rede(pt_orig)
-                    pt_uso = pt_orig
-                    if not imp:
-                        imps_locais = [i for i in cfg.get("impressoras",[]) if i.get("nome_impressora","").strip()]
-                        if imps_locais:
-                            i0 = imps_locais[0]
-                            imp = i0
-                            pt_uso = i0.get("printer_type","").strip() or i0.get("area","").strip() or pt_orig
-                            log.info(f"[REIMP] Usando impressora local '{i0.get('nome_impressora','')}' tipo='{pt_uso}'")
-                    if not imp and nome_imp_hist:
-                        imp = {"nome_impressora": nome_imp_hist, "tipo": "comum_win32"}
-                    if not imp:
-                        w.after(0, lambda: messagebox.showerror("Erro", "Nenhuma impressora configurada neste PC", parent=w))
-                        return
-
-                    texto = _fmt(resp, pt_uso, pt_uso)
-                    r = _imprimir_com_roteamento(imp, texto)
-                    nome_real = imp.get("nome_impressora") or imp.get("endereco_ip","")
-                    if r.get("ok"):
-                        log.info(f"[REIMP] OK em '{nome_real}'")
-                        w.after(0, lambda: messagebox.showinfo("OK", f"Reimpresso em:\n{nome_real}", parent=w))
-                    else:
-                        log.error(f"[REIMP] Erro ao imprimir: {r.get('erro','')}")
-                        w.after(0, lambda: messagebox.showerror("Erro", r.get("erro",""), parent=w))
-                except Exception as e:
-                    log.error(f"[REIMP] Excecao: {e}")
-                    w.after(0, lambda: messagebox.showerror("Erro", str(e), parent=w))
-            threading.Thread(target=_do_reimp, daemon=True).start()
-
-    tk.Button(hf, text="Reimprimir selecionado", command=reimprimir,
+    tk.Button(tab_hist, text="Reimprimir selecionado", command=reimprimir,
               bg="#cba6f7", fg="#1e1e2e", font=("Segoe UI",9,"bold"),
-              relief="flat", padx=12, pady=5, cursor="hand2").pack(anchor="w", pady=(8,0))
+              relief="flat", padx=12, pady=5, cursor="hand2").pack(anchor="w", padx=12, pady=(0,8))
 
+    # ── ABA 3: FALHAS (diagnostico) ───────────────────────────────
+    tab_falhas = tk.Frame(nb, bg="#1a1a2e"); nb.add(tab_falhas, text="  Falhas  ")
+
+    falha_hdr = tk.Frame(tab_falhas, bg="#1a1a2e"); falha_hdr.pack(fill="x", padx=12, pady=(10,4))
+    tk.Label(falha_hdr, text="Historico de falhas — ultimas 100 ocorrencias",
+             bg="#1a1a2e", fg="#6c7086", font=("Segoe UI",9)).pack(side="left")
+    def limpar_falhas():
+        _stats["falhas"].clear(); _stats["erros"] = 0
+        log.info("[DIAG] Historico de falhas limpo pelo operador")
+    tk.Button(falha_hdr, text="Limpar", command=limpar_falhas,
+              bg="#45475a", fg="#cdd6f4", font=("Segoe UI",8),
+              relief="flat", padx=8, pady=3, cursor="hand2").pack(side="right")
+
+    falha_frame = tk.Frame(tab_falhas, bg="#1a1a2e"); falha_frame.pack(fill="both", expand=True, padx=12, pady=(0,4))
+    cols_f = ("hora","causa","pedido","cliente","tipo","impressora","detalhe")
+    tree_f = ttk.Treeview(falha_frame, columns=cols_f, show="headings", height=14)
+    tree_f.heading("hora",      text="Hora");       tree_f.column("hora",       width=65,  minwidth=55)
+    tree_f.heading("causa",     text="Causa");      tree_f.column("causa",      width=160, minwidth=100)
+    tree_f.heading("pedido",    text="Pedido");     tree_f.column("pedido",     width=75,  minwidth=55)
+    tree_f.heading("cliente",   text="Cliente");    tree_f.column("cliente",    width=120, minwidth=80)
+    tree_f.heading("tipo",      text="Tipo");       tree_f.column("tipo",       width=70,  minwidth=55)
+    tree_f.heading("impressora",text="Impressora"); tree_f.column("impressora", width=130, minwidth=80)
+    tree_f.heading("detalhe",   text="Detalhe");    tree_f.column("detalhe",    width=280, minwidth=120)
+    sb_f = ttk.Scrollbar(falha_frame, orient="vertical", command=tree_f.yview)
+    tree_f.configure(yscrollcommand=sb_f.set)
+    tree_f.pack(side="left", fill="both", expand=True)
+    sb_f.pack(side="right", fill="y")
+
+    # Detalhe completo ao selecionar linha
+    detalhe_f = tk.Frame(tab_falhas, bg="#25253a", padx=12, pady=8)
+    detalhe_f.pack(fill="x", padx=12, pady=(0,8))
+    tk.Label(detalhe_f, text="Detalhe completo:", bg="#25253a", fg="#6c7086", font=("Segoe UI",9)).pack(anchor="w")
+    v_detalhe = tk.StringVar(value="Selecione uma linha para ver o detalhe completo")
+    tk.Label(detalhe_f, textvariable=v_detalhe, bg="#25253a", fg="#f38ba8",
+             font=("Segoe UI",9), wraplength=760, justify="left").pack(anchor="w")
+
+    def on_falha_select(event):
+        sel = tree_f.selection()
+        if not sel: return
+        idx = tree_f.index(sel[0])
+        if idx < len(_stats["falhas"]):
+            f = _stats["falhas"][idx]
+            v_detalhe.set(f"{f.get('data','')} {f.get('hora','')} | {f.get('causa','')} | {f.get('detalhe','')}")
+    tree_f.bind("<<TreeviewSelect>>", on_falha_select)
+
+    # Rotulos de causas traduzidos para exibicao
+    _causas_pt = {
+        "sem_mapeamento_windows":  "Sem mapeamento Windows",
+        "impressora_nao_encontrada": "Impressora nao encontrada",
+        "erro_impressora":         "Erro na impressora",
+        "falha_buscar_pedido":     "Falha ao buscar pedido",
+        "status_update_failed":    "Falha ao atualizar status",
+    }
+
+    # ── LOOP DE ATUALIZACAO ───────────────────────────────────────
     def atualizar():
         if not w.winfo_exists(): return
         v_total.set(str(_stats["total_impressos"]))
+        v_hoje.set(str(_stats["hoje"]))
         v_erros.set(str(_stats["erros"]))
         mins = int((time.time() - _start_time) / 60)
         v_uptime.set(f"{mins}m" if mins < 60 else f"{mins//60}h {mins%60}m")
-        online = "Ativo" if "Ativo" in status_poll else "Desconectado"
-        v_status.set(online)
         if _stats["ultimo_job"]:
             v_ujob.set(f"Impresso as {_stats['ultimo_job']}")
             v_uimp.set(f"Impressora: {_stats['ultima_impressora']}")
         if _stats["ultimo_erro"]:
             v_uerr.set(_stats["ultimo_erro"][:120])
-        # Atualiza card hoje
-        v_total.set(str(_stats["total_impressos"]))
-        v_hoje.set(str(_stats["hoje"]))
-        # Atualiza historico
+
+        # Aba titulo com contador de falhas
+        n_falhas = len(_stats["falhas"])
+        nb.tab(tab_falhas, text=f"  Falhas ({n_falhas})  " if n_falhas else "  Falhas  ")
+
+        # Historico de impressoes
         tree_h.delete(*tree_h.get_children())
         for h in _stats["historico"]:
-            tree_h.insert("",tk.END,values=(
-                h.get("hora",""),
-                h.get("tipo",""),
-                h.get("impressora","")[:25],
-                h.get("content_ref","")
+            tree_h.insert("", tk.END, values=(
+                h.get("hora",""), h.get("tipo",""),
+                h.get("impressora","")[:28],
+                h.get("content_ref",""),
+                h.get("cliente","")[:22],
             ))
+
+        # Historico de falhas
+        tree_f.delete(*tree_f.get_children())
+        for f in _stats["falhas"]:
+            causa_label = _causas_pt.get(f.get("causa",""), f.get("causa",""))
+            tree_f.insert("", tk.END, values=(
+                f.get("hora",""),
+                causa_label,
+                f.get("pedido",""),
+                f.get("cliente","")[:18],
+                f.get("tipo",""),
+                f.get("impressora","")[:20],
+                f.get("detalhe","")[:60],
+            ), tags=("falha",))
+        tree_f.tag_configure("falha", foreground="#f38ba8")
+
         w.after(2000, atualizar)
 
     atualizar()
