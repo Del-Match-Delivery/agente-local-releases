@@ -917,6 +917,7 @@ def proc_job(job):
     _stats["historico"].insert(0, entrada)
     if len(_stats["historico"]) > 50:
         _stats["historico"] = _stats["historico"][:50]
+    log.info(f"[HIST] Salvo job_id='{jid}' order_id='{_oid_real}' tipo='{pt}' impressora='{nome_imp}'")
 
 _jobs_em_proc = set()  # Evita processar o mesmo job duas vezes
 
@@ -937,7 +938,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.39"
+CURRENT_VERSION = "5.40"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1447,42 +1448,51 @@ def abrir_dashboard():
             try:
                 oid_hist = job_info.get("order_id","") or ""
                 pt_orig = job_info.get("tipo","receipt")
-                log.info(f"[REIMP] Iniciando job_id={jid} order_id={oid_hist} tipo={pt_orig}")
+                log.info(f"[REIMP] Iniciando job_id='{jid}' order_id='{oid_hist}' tipo='{pt_orig}' impressora_hist='{nome_imp_hist}'")
                 resp = None
                 if oid_hist and len(oid_hist) >= 36:
                     r1, s1 = _post(f"{SUPABASE_URL}/functions/v1/agent-get-order", {"order_id": oid_hist}, cfg.get("token",""))
-                    if s1 == 200 and r1: resp = r1; log.info("[REIMP] via order_id")
+                    log.info(f"[REIMP] Busca via order_id: HTTP {s1} | tem_resp={bool(r1)}")
+                    if s1 == 200 and r1 and not r1.get("error"): resp = r1
                 if not resp and jid and len(jid) >= 36:
                     r2, s2 = _post(f"{SUPABASE_URL}/functions/v1/agent-get-order", {"job_id": jid}, cfg.get("token",""))
-                    if s2 == 200 and r2: resp = r2; log.info("[REIMP] via job_id")
+                    log.info(f"[REIMP] Busca via job_id: HTTP {s2} | tem_resp={bool(r2)}")
+                    if s2 == 200 and r2 and not r2.get("error"): resp = r2
                 if not resp:
-                    log.error(f"[REIMP] Nao encontrou pedido: order_id={oid_hist} job_id={jid}")
-                    w.after(0, lambda: messagebox.showerror("Erro","Nao foi possivel buscar o pedido.",parent=w)); return
+                    log.error(f"[REIMP] Pedido nao encontrado. order_id='{oid_hist}' job_id='{jid}'")
+                    w.after(0, lambda: messagebox.showerror("Erro","Nao foi possivel buscar o pedido.\nVerifique o log para detalhes.",parent=w)); return
+                log.info(f"[REIMP] Pedido encontrado: order_number={resp.get('order_number','?')} items={len(resp.get('items') or resp.get('order_items') or [])}")
                 if "order_items" in resp and "items" not in resp:
                     raw_items = resp.get("order_items") or []
                     resp["items"] = [{"name": it.get("name_snapshot") or it.get("product_name") or it.get("name",""),
                                       "quantity": it.get("quantity",1), "unit_price_cents": it.get("price_cents_snapshot") or it.get("unit_price_cents",0),
                                       "notes": it.get("notes",""), "addons": it.get("addons_json") or it.get("addons",[])} for it in raw_items]
                 imp = _res_imp_por_rede(pt_orig); pt_uso = pt_orig
+                log.info(f"[REIMP] Impressora para tipo '{pt_orig}': {imp}")
                 if not imp:
                     imps_locais = [i for i in cfg.get("impressoras",[]) if i.get("nome_impressora","").strip()]
+                    log.info(f"[REIMP] Fallback impressoras locais: {[i.get('nome_impressora') for i in imps_locais]}")
                     if imps_locais:
                         i0 = imps_locais[0]; imp = i0
                         pt_uso = i0.get("printer_type","").strip() or i0.get("area","").strip() or pt_orig
-                if not imp and nome_imp_hist: imp = {"nome_impressora": nome_imp_hist, "tipo": "comum_win32"}
+                if not imp and nome_imp_hist:
+                    imp = {"nome_impressora": nome_imp_hist, "tipo": "comum_win32"}
+                    log.info(f"[REIMP] Usando impressora do historico: '{nome_imp_hist}'")
                 if not imp:
+                    log.error("[REIMP] Nenhuma impressora disponivel neste PC")
                     w.after(0, lambda: messagebox.showerror("Erro","Nenhuma impressora configurada neste PC",parent=w)); return
+                nome_real = imp.get("nome_impressora") or imp.get("endereco_ip","")
+                log.info(f"[REIMP] Imprimindo em '{nome_real}' pt_uso='{pt_uso}'")
                 texto = _fmt(resp, pt_uso, pt_uso)
                 r = _imprimir_com_roteamento(imp, texto)
-                nome_real = imp.get("nome_impressora") or imp.get("endereco_ip","")
                 if r.get("ok"):
                     log.info(f"[REIMP] OK em '{nome_real}'")
                     w.after(0, lambda: messagebox.showinfo("OK",f"Reimpresso em:\n{nome_real}",parent=w))
                 else:
-                    log.error(f"[REIMP] Erro: {r.get('erro','')}")
-                    w.after(0, lambda: messagebox.showerror("Erro",r.get("erro",""),parent=w))
+                    log.error(f"[REIMP] Falha na impressora '{nome_real}': {r.get('erro','')}")
+                    w.after(0, lambda: messagebox.showerror("Erro",f"Impressora: {nome_real}\n\n{r.get('erro','')}",parent=w))
             except Exception as e:
-                log.error(f"[REIMP] Excecao: {e}")
+                log.error(f"[REIMP] Excecao: {e}", exc_info=True)
                 w.after(0, lambda: messagebox.showerror("Erro",str(e),parent=w))
         threading.Thread(target=_do_reimp, daemon=True).start()
 

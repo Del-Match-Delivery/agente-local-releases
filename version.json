@@ -1,5 +1,5 @@
 {
-  "version": "5.39",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.39/AgenteLocal.exe",
-  "notes": "v5.39: Botao Status/Impressoes/Falhas adicionado na janela de Configuracoes para acesso direto ao dashboard."
+  "version": "5.40",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.40/AgenteLocal.exe",
+  "notes": "v5.40: Log detalhado de reimpressao para diagnostico (mostra cada passo no log)."
 }
