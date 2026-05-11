@@ -235,10 +235,22 @@ _token_invalido = False  # Evita abrir configuracoes multiplas vezes
 def ef_poll_jobs():
     global _agents_online, _token_invalido
     imps = cfg.get("impressoras", [])
-    # Inclui apenas areas de impressoras COM nome_impressora mapeado
-    # Impressoras sem mapeamento pertencem a outro agente — nao receber jobs delas
-    areas = list(set([i.get("area","").strip().lower() for i in imps
-                      if i.get("area","").strip() and i.get("nome_impressora","").strip()]))
+    # Inclui areas de impressoras COM nome_impressora mapeado.
+    # Tambem inclui area derivada do printer_type quando area nao esta preenchida.
+    # Impressoras sem mapeamento (nome_impressora vazio) sao de outro agente — nao declarar.
+    areas_set = set()
+    for i in imps:
+        if not i.get("nome_impressora","").strip():
+            continue  # sem mapeamento Windows — nao declara
+        area = i.get("area","").strip().lower()
+        ptype = i.get("printer_type","").strip().lower()
+        if area:
+            areas_set.add(area)
+        elif ptype:
+            # Impressora sem area mas com printer_type: deriva area equivalente
+            mapa_tipo_area = {"receipt":"caixa","kitchen":"cozinha","bar":"bar","delivery":"delivery","pickup":"balcao"}
+            areas_set.add(mapa_tipo_area.get(ptype, ptype))
+    areas = list(areas_set)
     payload = {
         "action": "poll",
         "device_name": DEVICE_NAME,
@@ -717,7 +729,7 @@ def _res_imp(pt):
     imps=cfg.get("impressoras",[])
     areas=_areas_para_tipo(pt)
     for i in imps:
-        if i.get("area","").strip().lower() in areas or i.get("printer_type")==pt:
+        if i.get("area","").strip().lower() in areas or i.get("printer_type","").strip()==pt:
             n=i.get("nome_impressora","")
             if n: return n
     return ""
@@ -739,7 +751,7 @@ def _agente_cobre_tipo(pt):
     areas_pt = _areas_para_tipo(pt)
     for i in imps:
         area = i.get("area","").strip().lower()
-        ptype = i.get("printer_type","")
+        ptype = i.get("printer_type","").strip()
         if area in areas_pt or ptype == pt:
             if i.get("nome_impressora",""):
                 return True
@@ -825,7 +837,9 @@ def proc_job(job):
                 
     ef_update_job(jid,"printed",pa=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()))
     nome_imp = imp.get("nome_impressora") or imp.get("endereco_ip","")
-    log.info(f"[PRINT] Job {jid} OK em '{nome_imp}'")
+    pedido_num = (content.get("order_number","") if content else "") or (content.get("order_id","")[:8] if content else "")
+    cliente = (content.get("customer_name","") if content else "") or ""
+    log.info(f"[PRINT] Job {jid} OK | tipo={pt} | pedido={pedido_num} | cliente={cliente} | impressora='{nome_imp}'")
     _stats["total_impressos"] += 1
     _stats["ultimo_job"] = time.strftime("%H:%M:%S")
     _stats["ultima_impressora"] = nome_imp
@@ -843,7 +857,8 @@ def proc_job(job):
         "tipo": pt,
         "job_id": jid,
         "order_id": content.get("order_id","") if content else "",
-        "content_ref": content.get("order_number","") or content.get("order_id","")[:8] if content else ""
+        "content_ref": (content.get("order_number","") or content.get("order_id","")[:8]) if content else "",
+        "cliente": cliente,
     }
     _stats["historico"].insert(0, entrada)
     if len(_stats["historico"]) > 50:
@@ -868,7 +883,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.34"
+CURRENT_VERSION = "5.35"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1276,18 +1291,17 @@ def abrir_dashboard():
             def _do_reimp(jid=jid, job_info=job_info, nome_imp_hist=nome_imp_hist):
                 try:
                     oid_hist = job_info.get("order_id","") or job_info.get("content_ref","")
-                    pt = job_info.get("tipo","receipt")
-                    # Busca pedido completo via agent-get-order (mesmo endpoint do proc_job)
+                    pt_orig = job_info.get("tipo","receipt")
+                    # Busca pedido completo via agent-get-order
                     resp = ef_get_order(oid_hist) if oid_hist and len(oid_hist) >= 36 else None
                     if not resp:
-                        # Fallback: tenta via job_id no agente-get-order legado
                         resp2, s2 = _post(
                             f"{SUPABASE_URL}/functions/v1/agente-get-order",
                             {"job_id": jid}, cfg.get("token","")
                         )
                         resp = resp2 if s2 == 200 and resp2 else None
                     if resp:
-                        # Normaliza order_items → items (igual ao proc_job)
+                        # Normaliza order_items → items
                         if "order_items" in resp and "items" not in resp:
                             raw_items = resp.get("order_items") or []
                             resp["items"] = [
@@ -1300,14 +1314,26 @@ def abrir_dashboard():
                                 }
                                 for it in raw_items
                             ]
-                        texto = _fmt(resp, pt, pt)
-                        # Tenta impressora correta pelo tipo; fallback: impressora do historico
-                        imp = _res_imp_por_rede(pt)
+                        # Resolve impressora: primeiro tenta pelo tipo original,
+                        # depois qualquer impressora deste PC (fallback multi-agente),
+                        # depois a do historico
+                        imp = _res_imp_por_rede(pt_orig)
+                        pt_uso = pt_orig
+                        if not imp:
+                            # Este PC nao tem impressora para o tipo original (ex: cozinha tentando reimprimir receipt)
+                            # Usa a primeira impressora disponivel neste PC com o tipo dela
+                            imps_locais = [i for i in cfg.get("impressoras",[]) if i.get("nome_impressora","").strip()]
+                            if imps_locais:
+                                i0 = imps_locais[0]
+                                imp = i0
+                                pt_uso = i0.get("printer_type","") or i0.get("area","") or pt_orig
+                                log.info(f"[REIMP] Tipo original '{pt_orig}' nao encontrado, usando impressora local '{i0.get('nome_impressora','')}' tipo='{pt_uso}'")
                         if not imp and nome_imp_hist:
                             imp = {"nome_impressora": nome_imp_hist, "tipo": "comum_win32"}
                         if not imp:
-                            w.after(0, lambda: messagebox.showerror("Erro", f"Sem impressora para '{pt}'", parent=w))
+                            w.after(0, lambda: messagebox.showerror("Erro", f"Nenhuma impressora configurada neste PC", parent=w))
                             return
+                        texto = _fmt(resp, pt_uso, pt_uso)
                         r = _imprimir_com_roteamento(imp, texto)
                         nome_real = imp.get("nome_impressora") or imp.get("endereco_ip","")
                         if r.get("ok"):
