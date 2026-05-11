@@ -1222,7 +1222,84 @@ def abrir_dashboard():
     w.lift(); w.focus_force()
 
     tk.Label(w, text="Concentrador de Impressoes e Dispositivos",
-             bg="#1a1a2e", fg="#cdd6f4", font=("Segoe UI",13,"bold")).pack(pady=(14,4))
+             bg="#1a1a2e", fg="#cdd6f4", font=("Segoe UI",13,"bold")).pack(pady=(14,2))
+
+    # Barra de agentes online
+    agentes_bar = tk.Frame(w, bg="#25253a"); agentes_bar.pack(fill="x", padx=20, pady=(0,4))
+    agentes_var = tk.StringVar(value="Carregando agentes...")
+    agentes_lbl = tk.Label(agentes_bar, textvariable=agentes_var,
+                           bg="#25253a", fg="#a6e3a1", font=("Segoe UI",8), anchor="w", padx=8, pady=4)
+    agentes_lbl.pack(side="left", fill="x", expand=True)
+
+    # Referência para _popular_tree_ag definida depois — preenchida quando a aba for criada
+    _popular_tree_ag_ref = [None]
+
+    def _atualizar_barra_agentes():
+        if not w.winfo_exists(): return
+        def _fetch():
+            try:
+                imps = cfg.get("impressoras", [])
+                areas = list(set([
+                    i.get("area","").strip().lower() for i in imps
+                    if i.get("area","").strip() and i.get("nome_impressora","").strip()
+                ]))
+                payload = {"device_name": DEVICE_NAME, "device_fingerprint": DEVICE_FINGERPRINT}
+                if areas: payload["areas"] = areas
+                resp, s = _post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll", payload, cfg.get("token",""))
+                if s == 200 and resp:
+                    lista = resp.get("agents_online", [])
+                    import datetime
+                    agora = time.time()
+                    partes = []
+                    for ag in lista:
+                        nome = ag.get("device_name") or "Agente"
+                        areas_ag = ", ".join(ag.get("covered_areas") or []) or "?"
+                        hb = ag.get("last_heartbeat_at","")
+                        try:
+                            ts = datetime.datetime.fromisoformat(hb.replace("Z","+00:00"))
+                            diff = agora - ts.timestamp()
+                            online = diff < 35
+                        except Exception:
+                            online = False
+                        marcador = "●" if online else "○"
+                        este = " (este)" if ag.get("device_name","") == DEVICE_NAME else ""
+                        partes.append(f"{marcador} {nome}{este} [{areas_ag}]")
+                    texto = "  ".join(partes) if partes else "Nenhum agente online"
+                    if not w.winfo_exists(): return
+                    _root.after(0, lambda: agentes_var.set(texto) if w.winfo_exists() else None)
+                    # Atualiza _agents_online global e tabela da aba Agentes
+                    global _agents_online
+                    _agents_online = lista
+                    if _popular_tree_ag_ref[0]:
+                        _root.after(0, lambda: _popular_tree_ag_ref[0](lista) if w.winfo_exists() else None)
+            except Exception:
+                pass
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _loop_barra_agentes():
+        if not w.winfo_exists(): return
+        _atualizar_barra_agentes()
+        w.after(15000, _loop_barra_agentes)
+
+    # Popula imediatamente com cache e agenda refresh
+    if _agents_online:
+        import datetime as _dt
+        agora = time.time()
+        partes = []
+        for ag in _agents_online:
+            nome = ag.get("device_name") or "Agente"
+            areas_ag = ", ".join(ag.get("covered_areas") or []) or "?"
+            hb = ag.get("last_heartbeat_at","")
+            try:
+                ts = _dt.datetime.fromisoformat(hb.replace("Z","+00:00"))
+                online = (agora - ts.timestamp()) < 35
+            except Exception:
+                online = False
+            marcador = "●" if online else "○"
+            este = " (este)" if ag.get("device_name","") == DEVICE_NAME else ""
+            partes.append(f"{marcador} {nome}{este} [{areas_ag}]")
+        agentes_var.set("  ".join(partes) if partes else "Aguardando dados...")
+    w.after(500, _loop_barra_agentes)
 
     # Barra de botoes no topo
     bf = tk.Frame(w, bg="#1a1a2e"); bf.pack(fill="x", padx=20, pady=(0,6))
@@ -1467,6 +1544,65 @@ def abrir_dashboard():
         "status_update_failed":    "Falha ao atualizar status",
     }
 
+    # ── ABA 4: AGENTES ────────────────────────────────────────────
+    tab_ag = tk.Frame(nb, bg="#1a1a2e"); nb.add(tab_ag, text="  Agentes  ")
+
+    tk.Label(tab_ag, text="Agentes conectados ao mesmo restaurante",
+             bg="#1a1a2e", fg="#cdd6f4", font=("Segoe UI",9,"bold"),
+             anchor="w", padx=8, pady=4).pack(fill="x", padx=10, pady=(10,2))
+
+    cols_ag = ("maquina","areas","status","ultimo")
+    tree_ag = ttk.Treeview(tab_ag, columns=cols_ag, show="headings", height=10)
+    for col, lbl, cw in [("maquina","Maquina",200),("areas","Area(s)",200),("status","Status",90),("ultimo","Ultimo heartbeat",160)]:
+        tree_ag.heading(col, text=lbl); tree_ag.column(col, width=cw, anchor="w")
+    tree_ag.tag_configure("online",  foreground="#a6e3a1")
+    tree_ag.tag_configure("recente", foreground="#f9e2af")
+    tree_ag.tag_configure("offline", foreground="#f38ba8")
+    sb_ag = ttk.Scrollbar(tab_ag, orient="vertical", command=tree_ag.yview)
+    tree_ag.configure(yscrollcommand=sb_ag.set)
+    ag_frame = tk.Frame(tab_ag, bg="#1a1a2e"); ag_frame.pack(fill="both", expand=True, padx=10, pady=4)
+    tree_ag.pack(in_=ag_frame, side="left", fill="both", expand=True)
+    sb_ag.pack(in_=ag_frame, side="right", fill="y")
+
+    ag_status_var = tk.StringVar(value="")
+    tk.Label(tab_ag, textvariable=ag_status_var, bg="#1a1a2e", fg="#6c7086",
+             font=("Segoe UI",8)).pack(anchor="w", padx=12)
+    tk.Button(tab_ag, text="Atualizar agora", command=lambda: _atualizar_barra_agentes(),
+              bg="#89b4fa", fg="#1e1e2e", font=("Segoe UI",9,"bold"),
+              relief="flat", padx=12, pady=4, cursor="hand2").pack(pady=4)
+
+    def _popular_tree_ag(lista):
+        if not w.winfo_exists(): return
+        tree_ag.delete(*tree_ag.get_children())
+        import datetime
+        agora = time.time()
+        for ag in lista:
+            nome = ag.get("device_name") or "Agente"
+            areas_ag = ", ".join(ag.get("covered_areas") or []) or "todas"
+            hb = ag.get("last_heartbeat_at","")
+            try:
+                ts = datetime.datetime.fromisoformat(hb.replace("Z","+00:00"))
+                diff = agora - ts.timestamp()
+                if diff < 35:
+                    status_txt = "Online"; tag = "online"
+                elif diff < 120:
+                    status_txt = "Recente"; tag = "recente"
+                else:
+                    status_txt = "Offline"; tag = "offline"
+                hb_fmt = time.strftime("%H:%M:%S", time.localtime(ts.timestamp()))
+            except Exception:
+                status_txt = "?"; tag = "recente"; hb_fmt = hb[:19]
+            if ag.get("device_name","") == DEVICE_NAME:
+                nome = nome + " (este)"
+            tree_ag.insert("", "end", values=(nome, areas_ag, status_txt, hb_fmt), tags=(tag,))
+        ag_status_var.set(f"Atualizado: {time.strftime('%H:%M:%S')}  |  {len(lista)} agente(s)")
+
+    # Registra referência para uso em _atualizar_barra_agentes
+    _popular_tree_ag_ref[0] = _popular_tree_ag
+
+    # Popula imediatamente com cache
+    _popular_tree_ag(_agents_online)
+
     # ── LOOP DE ATUALIZACAO ───────────────────────────────────────
     def atualizar():
         if not w.winfo_exists(): return
@@ -1509,6 +1645,9 @@ def abrir_dashboard():
                 f.get("detalhe","")[:60],
             ), tags=("falha",))
         tree_f.tag_configure("falha", foreground="#f38ba8")
+
+        # Atualiza tabela de agentes com dados do cache global
+        _popular_tree_ag(_agents_online)
 
         w.after(2000, atualizar)
 
