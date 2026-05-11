@@ -1,5 +1,5 @@
 {
-  "version": "5.32",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.32/AgenteLocal.exe",
-  "notes": "v5.32: Fix multiplas instancias - mutex verificado antes de matar processos. Fix update automatico (download como .tmp). Fix cupom sem itens."
+  "version": "5.33",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.33/AgenteLocal.exe",
+  "notes": "v5.33: Fix sincronizacao de impressoras - nunca perde mapeamento existente, auto-mapeia quando nome_impressora esta vazio."
 }

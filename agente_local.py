@@ -292,30 +292,45 @@ def sincronizar_impressoras():
         if not printers: return
         iw = listar_impressoras_windows()
         # Index case-insensitive para preservar TUDO que o usuario configurou manualmente
-        imps_atuais = {i.get("nome","").strip().lower(): i for i in cfg.get("impressoras",[])}
+        # Indexa por nome E por area/printer_type para achar mesmo se nome mudou no servidor
+        imps_atuais_nome = {i.get("nome","").strip().lower(): i for i in cfg.get("impressoras",[])}
+        imps_atuais_area = {i.get("area","").strip().lower(): i for i in cfg.get("impressoras",[])}
+        imps_atuais_tipo = {i.get("printer_type","").strip().lower(): i for i in cfg.get("impressoras",[])}
         imps_novos = []
+
+        def _auto_match(ns):
+            """Tenta match automatico do nome do servidor com impressoras Windows."""
+            if ns in iw: return ns
+            m = next((x for x in iw if ns.upper() in x.upper() or x.upper() in ns.upper()), "")
+            if not m and " " in ns:
+                first = ns.split(" ")[0].upper()
+                if len(first) > 2:
+                    m = next((x for x in iw if first in x.upper()), "")
+            return m
+
         for p in printers:
             ns = p.get("name",""); ts = p.get("printer_type","receipt")
             area_servidor = {"receipt":"caixa","kitchen":"cozinha","bar":"bar"}.get(ts,"caixa")
 
-            existente = imps_atuais.get(ns.strip().lower())
+            # Busca impressora existente: primeiro por nome, depois por area, depois por tipo
+            existente = (imps_atuais_nome.get(ns.strip().lower())
+                         or imps_atuais_area.get(area_servidor)
+                         or imps_atuais_tipo.get(ts))
             if existente:
-                # Preserva nome_impressora e modo configurados pelo usuario
-                # Mas SEMPRE corrige area e printer_type pelo servidor (fonte de verdade)
                 imp = dict(existente)
+                imp["nome"] = ns  # atualiza nome para o do servidor
                 imp["area"] = area_servidor
                 imp["printer_type"] = ts
+                # Se nome_impressora estava vazio, tenta match automatico agora
+                if not imp.get("nome_impressora"):
+                    match = _auto_match(ns)
+                    if match:
+                        imp["nome_impressora"] = match
+                        log.info(f"[SYNC] Auto-mapeou '{ns}' -> '{match}'")
                 imps_novos.append(imp)
             else:
-                # Nova impressora do servidor - tenta match automático
-                match = ""
-                if ns in iw: match = ns
-                if not match:
-                   match = next((x for x in iw if ns.upper() in x.upper() or x.upper() in ns.upper()), "")
-                if not match and " " in ns:
-                   first = ns.split(" ")[0].upper()
-                   if len(first) > 2:
-                      match = next((x for x in iw if first in x.upper()), "")
+                # Nova impressora do servidor - tenta match automatico
+                match = _auto_match(ns)
                 imps_novos.append({"nome":ns,"area":area_servidor,"printer_type":ts,"nome_impressora":match,"tipo":"comum_win32","modo":"texto"})
 
         if str(imps_novos) != str(cfg.get("impressoras",[])):
@@ -851,7 +866,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.32"
+CURRENT_VERSION = "5.33"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
