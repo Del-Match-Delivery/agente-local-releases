@@ -843,10 +843,11 @@ def proc_job(job):
             _cliente_ref = content.get("customer_name","") or _cliente_ref
             log.info("[ORDER] OK")
         else:
-            log.error(f"[ORDER] Falha {oid}")
+            log.error(f"[ORDER] Falha ao buscar {oid} — imprimindo com content basico do job")
             _registrar_falha(jid, "falha_buscar_pedido",
-                             f"Nao foi possivel buscar dados do pedido {oid} no servidor",
+                             f"Nao foi possivel buscar dados do pedido {oid} — imprimindo com dados basicos",
                              tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
+            # NAO retorna — continua com o content original para garantir que o job sai na impressora
 
     # Resolve impressora com suporte a multi-rede
     imp = _res_imp_por_rede(pt, printer_id=pid)
@@ -875,8 +876,10 @@ def proc_job(job):
                                      impressora=nome_imp_local)
                     return
         except Exception as e:
-            log.error(f"[PRINT] Erro ao decodificar ESC/POS: {e}")
-    else:
+            log.error(f"[PRINT] Erro ao decodificar ESC/POS: {e} — tentando imprimir como texto")
+            escpos_b64 = None  # forca fallback para texto abaixo
+
+    if not escpos_b64:
         texto=_fmt(content,jt,pt)
         for _ in range(copies):
             r=_imprimir_com_roteamento(imp, texto)
@@ -938,7 +941,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.40"
+CURRENT_VERSION = "5.41"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

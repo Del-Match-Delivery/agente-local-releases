@@ -1,5 +1,5 @@
 {
-  "version": "5.40",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.40/AgenteLocal.exe",
-  "notes": "v5.40: Log detalhado de reimpressao para diagnostico (mostra cada passo no log)."
+  "version": "5.41",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.41/AgenteLocal.exe",
+  "notes": "v5.41: Jobs nao sao mais perdidos quando falha buscar pedido ou decodificar ESC/POS - sempre tenta imprimir com dados disponiveis."
 }
