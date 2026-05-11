@@ -1,5 +1,5 @@
 {
-  "version": "5.33",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.33/AgenteLocal.exe",
-  "notes": "v5.33: Fix sincronizacao de impressoras - nunca perde mapeamento existente, auto-mapeia quando nome_impressora esta vazio."
+  "version": "5.34",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.34/AgenteLocal.exe",
+  "notes": "v5.34: Agente so recebe jobs das impressoras que tem mapeamento Windows configurado. Impressoras sem mapeamento sao de outro agente."
 }

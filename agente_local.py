@@ -235,9 +235,10 @@ _token_invalido = False  # Evita abrir configuracoes multiplas vezes
 def ef_poll_jobs():
     global _agents_online, _token_invalido
     imps = cfg.get("impressoras", [])
-    # Inclui areas de todas as impressoras configuradas (mesmo sem nome mapeado)
-    # para garantir que o servidor mande os jobs. O erro de "sem nome" e tratado em proc_job.
-    areas = list(set([i.get("area","").strip().lower() for i in imps if i.get("area","").strip()]))
+    # Inclui apenas areas de impressoras COM nome_impressora mapeado
+    # Impressoras sem mapeamento pertencem a outro agente — nao receber jobs delas
+    areas = list(set([i.get("area","").strip().lower() for i in imps
+                      if i.get("area","").strip() and i.get("nome_impressora","").strip()]))
     payload = {
         "action": "poll",
         "device_name": DEVICE_NAME,
@@ -271,6 +272,7 @@ def ef_update_job(jid, sv, em=None, pa=None):
     if pa: d["printed_at"]=pa
     _,s=_post(f"{SUPABASE_URL}/functions/v1/print-job-status",d,cfg.get("token",""))
     return s in (200,204)
+
 
 def autoconfigurar(token):
     resp,s=_post(f"{SUPABASE_URL}/functions/v1/agent-unified-poll",{"action":"poll"},token)
@@ -866,7 +868,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.33"
+CURRENT_VERSION = "5.34"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
