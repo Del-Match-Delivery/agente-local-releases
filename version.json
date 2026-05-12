@@ -1,5 +1,5 @@
 {
-  "version": "5.45",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.45/AgenteLocal.exe",
-  "notes": "v5.45: Multi-agente corrigido — caixa so recebe jobs de receipt, cozinha so recebe kitchen. Job sem mapeamento local e ignorado silenciosamente (nao vira failed)."
+  "version": "5.46",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.46/AgenteLocal.exe",
+  "notes": "v5.46: Corte de papel na cozinha (fonte grande), log detalhado de poll para diagnostico."
 }

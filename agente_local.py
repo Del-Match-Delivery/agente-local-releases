@@ -294,9 +294,9 @@ def ef_poll_jobs():
     if s==200 and resp:
         _token_invalido = False
         _agents_online = resp.get("agents_online", [])
-        log.info(f"[POLL] Resposta HTTP {s}: {str(resp)[:300]}")
         jobs = resp.get("print_jobs") or resp.get("jobs") or []
         if isinstance(resp, list): jobs = resp
+        log.info(f"[POLL] OK areas={areas} jobs={len(jobs)} tipos={[j.get('printer_type') for j in jobs]} agentes={[a.get('device_name') for a in _agents_online]}")
         return jobs
     if s == 401:
         if not _token_invalido:
@@ -671,6 +671,7 @@ def _fmt(content, jt, pt):
                 parts.append(enc(f"OBS: {obs2}"))
             parts.append(enc(S))
             parts.append(FNORMAL)
+            parts.append(b"\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")  # avanço + corte
             return b"".join(parts)
     elif tipo=="pickup":
         ne=content.get("company_name","") or cfg.get("restaurant_name","")
@@ -944,7 +945,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.45"
+CURRENT_VERSION = "5.46"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
