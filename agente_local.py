@@ -257,30 +257,18 @@ _token_invalido = False  # Evita abrir configuracoes multiplas vezes
 def ef_poll_jobs():
     global _agents_online, _token_invalido
     imps = cfg.get("impressoras", [])
-    # Declara apenas areas de impressoras COM nome_impressora mapeado.
-    # Isso garante que o servidor so manda jobs que este agente consegue imprimir.
-    # Impressoras sem mapeamento pertencem a outro agente — nao declarar aqui.
+    # Declara TODAS as areas cadastradas (com ou sem nome_impressora).
+    # O agente recebe todos os jobs das suas areas e processa apenas os que tem impressora mapeada.
+    # Jobs sem mapeamento local sao ignorados silenciosamente — o outro agente na mesma area processa.
     mapa_tipo_area = {"receipt":"caixa","kitchen":"cozinha","bar":"bar","delivery":"delivery","pickup":"balcao"}
     areas_set = set()
     for i in imps:
-        if not i.get("nome_impressora","").strip():
-            continue  # sem mapeamento Windows — este job e de outro agente
         area = i.get("area","").strip().lower()
         ptype = i.get("printer_type","").strip().lower()
         if area:
             areas_set.add(area)
         elif ptype:
             areas_set.add(mapa_tipo_area.get(ptype, ptype))
-    # Se nenhuma impressora tem mapeamento, declara todas as areas para nao perder jobs
-    # (modo legado: agente unico sem configuracao multi-agente)
-    if not areas_set:
-        for i in imps:
-            area = i.get("area","").strip().lower()
-            ptype = i.get("printer_type","").strip().lower()
-            if area:
-                areas_set.add(area)
-            elif ptype:
-                areas_set.add(mapa_tipo_area.get(ptype, ptype))
     areas = list(areas_set)
     payload = {
         "action": "poll",
@@ -945,7 +933,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.46"
+CURRENT_VERSION = "5.47"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

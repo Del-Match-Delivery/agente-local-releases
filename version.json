@@ -1,5 +1,5 @@
 {
-  "version": "5.46",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.46/AgenteLocal.exe",
-  "notes": "v5.46: Corte de papel na cozinha (fonte grande), log detalhado de poll para diagnostico."
+  "version": "5.47",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.47/AgenteLocal.exe",
+  "notes": "v5.47: Fix definitivo multi-agente — cada agente declara todas as areas cadastradas, processa apenas o que tem impressora mapeada, ignora o resto."
 }
