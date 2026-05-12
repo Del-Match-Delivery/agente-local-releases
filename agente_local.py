@@ -257,20 +257,16 @@ _token_invalido = False  # Evita abrir configuracoes multiplas vezes
 def ef_poll_jobs():
     global _agents_online, _token_invalido
     imps = cfg.get("impressoras", [])
-    # Inclui areas de impressoras COM nome_impressora mapeado.
-    # Tambem inclui area derivada do printer_type quando area nao esta preenchida.
-    # Impressoras sem mapeamento (nome_impressora vazio) sao de outro agente — nao declarar.
+    # Declara TODAS as areas das impressoras cadastradas, com ou sem nome_impressora.
+    # O agente precisa receber os jobs — a verificacao de mapeamento acontece em proc_job.
+    mapa_tipo_area = {"receipt":"caixa","kitchen":"cozinha","bar":"bar","delivery":"delivery","pickup":"balcao"}
     areas_set = set()
     for i in imps:
-        if not i.get("nome_impressora","").strip():
-            continue  # sem mapeamento Windows — nao declara
         area = i.get("area","").strip().lower()
         ptype = i.get("printer_type","").strip().lower()
         if area:
             areas_set.add(area)
         elif ptype:
-            # Impressora sem area mas com printer_type: deriva area equivalente
-            mapa_tipo_area = {"receipt":"caixa","kitchen":"cozinha","bar":"bar","delivery":"delivery","pickup":"balcao"}
             areas_set.add(mapa_tipo_area.get(ptype, ptype))
     areas = list(areas_set)
     payload = {
@@ -952,7 +948,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.43"
+CURRENT_VERSION = "5.44"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

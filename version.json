@@ -1,5 +1,5 @@
 {
-  "version": "5.43",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.43/AgenteLocal.exe",
-  "notes": "v5.43: Corrige loop infinito de jobs receipt no agente da cozinha - job entregue ao agente errado e ignorado quando outro agente online cobre o tipo."
+  "version": "5.44",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.44/AgenteLocal.exe",
+  "notes": "v5.44: Corrige impressoes nao chegando — agente declara todas as areas cadastradas independente de mapeamento Windows."
 }
