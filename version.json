@@ -1,5 +1,5 @@
 {
-  "version": "5.44",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.44/AgenteLocal.exe",
-  "notes": "v5.44: Corrige impressoes nao chegando — agente declara todas as areas cadastradas independente de mapeamento Windows."
+  "version": "5.45",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.45/AgenteLocal.exe",
+  "notes": "v5.45: Multi-agente corrigido — caixa so recebe jobs de receipt, cozinha so recebe kitchen. Job sem mapeamento local e ignorado silenciosamente (nao vira failed)."
 }

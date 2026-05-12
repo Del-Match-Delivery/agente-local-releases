@@ -257,17 +257,30 @@ _token_invalido = False  # Evita abrir configuracoes multiplas vezes
 def ef_poll_jobs():
     global _agents_online, _token_invalido
     imps = cfg.get("impressoras", [])
-    # Declara TODAS as areas das impressoras cadastradas, com ou sem nome_impressora.
-    # O agente precisa receber os jobs — a verificacao de mapeamento acontece em proc_job.
+    # Declara apenas areas de impressoras COM nome_impressora mapeado.
+    # Isso garante que o servidor so manda jobs que este agente consegue imprimir.
+    # Impressoras sem mapeamento pertencem a outro agente — nao declarar aqui.
     mapa_tipo_area = {"receipt":"caixa","kitchen":"cozinha","bar":"bar","delivery":"delivery","pickup":"balcao"}
     areas_set = set()
     for i in imps:
+        if not i.get("nome_impressora","").strip():
+            continue  # sem mapeamento Windows — este job e de outro agente
         area = i.get("area","").strip().lower()
         ptype = i.get("printer_type","").strip().lower()
         if area:
             areas_set.add(area)
         elif ptype:
             areas_set.add(mapa_tipo_area.get(ptype, ptype))
+    # Se nenhuma impressora tem mapeamento, declara todas as areas para nao perder jobs
+    # (modo legado: agente unico sem configuracao multi-agente)
+    if not areas_set:
+        for i in imps:
+            area = i.get("area","").strip().lower()
+            ptype = i.get("printer_type","").strip().lower()
+            if area:
+                areas_set.add(area)
+            elif ptype:
+                areas_set.add(mapa_tipo_area.get(ptype, ptype))
     areas = list(areas_set)
     payload = {
         "action": "poll",
@@ -801,29 +814,12 @@ def proc_job(job):
     _pedido_ref = content.get("order_number","") or content.get("order_id","")[:8] if content else ""
     _cliente_ref = content.get("customer_name","") if content else ""
 
-    # Se agente nao tem impressora mapeada para este tipo, verifica se outro agente online cobre
+    # Se agente nao tem impressora mapeada para este tipo, ignora silenciosamente.
+    # O servidor so deve mandar este job se este agente declarou a area — mas por seguranca
+    # (ex: job chegou antes do poll com areas atualizado), nao marca failed para nao perder o job.
+    # O outro agente que tem a impressora mapeada vai processar este job.
     if not _agente_cobre_tipo(pt):
-        areas_pt = _areas_para_tipo(pt)
-        # Verifica se outro agente online declara cobertura para este tipo
-        outro_cobre = any(
-            any(a.lower() in areas_pt or a.lower() == pt for a in (ag.get("covered_areas") or []))
-            for ag in _agents_online
-            if ag.get("device_name","") != DEVICE_NAME
-        )
-        if outro_cobre:
-            # Outro agente vai processar — ignora silenciosamente
-            log.info(f"[PRINT] Job {jid} tipo={pt} entregue ao agente errado — outro agente online cobre este tipo, ignorando")
-        else:
-            # Nenhum agente cobre — so entao marca failed para nao sumir
-            imps = cfg.get("impressoras", [])
-            tem_area = any((i.get("area","").strip().lower() in areas_pt or i.get("printer_type","") == pt) for i in imps)
-            if tem_area:
-                msg = f"Impressora '{pt}' sem mapeamento Windows - configure na aba Impressoras"
-                ef_update_job(jid, "failed", msg)
-                _registrar_falha(jid, "sem_mapeamento_windows", msg,
-                                 tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
-            else:
-                log.info(f"[PRINT] Job {jid} tipo={pt} ignorado — sem agente configurado para este tipo")
+        log.info(f"[PRINT] Job {jid} tipo={pt} — sem impressora mapeada neste agente, ignorando (outro agente processa)")
         return
     log.info(f"[PRINT] Job {jid} tipo={pt}")
     oid=content.get("order_id") or content.get("id","")
@@ -948,7 +944,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.44"
+CURRENT_VERSION = "5.45"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
