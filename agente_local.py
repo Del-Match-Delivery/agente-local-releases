@@ -933,7 +933,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.48"
+CURRENT_VERSION = "5.49"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1712,6 +1712,11 @@ def abrir_config():
     sty.configure("Treeview.Heading",background="#45475a",foreground="white",font=("Segoe UI",9,"bold"))
     sty.map("Treeview",background=[("selected","#89b4fa")])
 
+    # IMPORTANTE: empacota o rod (botoes inferiores) ANTES do notebook
+    # para que ele sempre fique visivel na parte de baixo, independente do tamanho da janela
+    rod = tk.Frame(w, bg="#181825")
+    rod.pack(fill="x", side="bottom")
+
     nb=ttk.Notebook(w); nb.pack(fill="both",expand=True,padx=10,pady=10)
 
     # CONEXAO
@@ -2401,7 +2406,7 @@ def abrir_config():
               bg="#fab387",fg="#1e1e2e",font=("Segoe UI",10,"bold"),relief="flat",padx=15,pady=8,cursor="hand2",width=30).pack(pady=8)
 
     # RODAPE
-    def salvar():
+    def salvar(silencioso=False):
         global cfg
         cfg["token"]=tv.get().strip(); cfg["poll_interval"]=int(pv.get().strip() or "3")
         # Index das impressoras atuais para preservar printer_type
@@ -2455,10 +2460,11 @@ def abrir_config():
                 )
                 log.info("[SCO] Selfcheckout iniciado apos salvar config")
         salvar_config(cfg)
-        messagebox.showinfo("Salvo!","Configuracoes salvas!\nReinicie o agente para aplicar.",parent=w)
+        if not silencioso:
+            messagebox.showinfo("Salvo!","Configuracoes salvas!\nReinicie o agente para aplicar.",parent=w)
         w.destroy()
 
-    rod=tk.Frame(w,bg="#181825"); rod.pack(fill="x",side="bottom")
+    # Botoes do rodape — rod ja foi criado e empacotado no topo da funcao
     tk.Button(rod,text="Salvar Configuracoes",command=salvar,bg="#89b4fa",fg="#1e1e2e",
               font=("Segoe UI",11,"bold"),relief="flat",padx=20,pady=12,cursor="hand2").pack(side="right",padx=10,pady=8)
     tk.Button(rod,text="Cancelar",command=w.destroy,bg="#45475a",fg="white",
@@ -2467,6 +2473,16 @@ def abrir_config():
               font=("Segoe UI",10,"bold"),relief="flat",padx=15,pady=12,cursor="hand2").pack(side="left",padx=10,pady=8)
     tk.Button(rod,text="Status / Impressoes / Falhas",command=abrir_dashboard,bg="#a6e3a1",fg="#1e1e2e",
               font=("Segoe UI",10,"bold"),relief="flat",padx=15,pady=12,cursor="hand2").pack(side="left",padx=4,pady=8)
+
+    # AUTO-SAVE: salva configuracoes automaticamente quando o usuario fecha a janela (X no canto)
+    def _on_close_window():
+        try:
+            salvar(silencioso=True)
+            log.info("[CONFIG] Configuracoes salvas automaticamente ao fechar")
+        except Exception as e:
+            log.warning(f"[CONFIG] Erro ao salvar ao fechar: {e}")
+            w.destroy()
+    w.protocol("WM_DELETE_WINDOW", _on_close_window)
 
 def reiniciar_app():
     log.info("Reiniciando agente...")

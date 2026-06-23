@@ -1,5 +1,5 @@
 {
-  "version": "5.48",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.48/AgenteLocal.exe",
-  "notes": "v5.48: Corrige loop de multiplas instancias — agente mata todas as outras AgenteLocal* ao iniciar, lock de 5min entre tentativas de update."
+  "version": "5.49",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.49/AgenteLocal.exe",
+  "notes": "v5.49: Botoes do rodape sempre visiveis (Salvar/Cancelar/Status/Log), salvamento automatico ao fechar janela pelo X."
 }
