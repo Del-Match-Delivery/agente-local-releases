@@ -1,5 +1,5 @@
 {
-  "version": "5.47",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.47/AgenteLocal.exe",
-  "notes": "v5.47: Fix definitivo multi-agente — cada agente declara todas as areas cadastradas, processa apenas o que tem impressora mapeada, ignora o resto."
+  "version": "5.48",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.48/AgenteLocal.exe",
+  "notes": "v5.48: Corrige loop de multiplas instancias — agente mata todas as outras AgenteLocal* ao iniciar, lock de 5min entre tentativas de update."
 }

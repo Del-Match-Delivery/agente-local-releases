@@ -933,7 +933,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.47"
+CURRENT_VERSION = "5.48"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1016,6 +1016,16 @@ async def checar_atualizacao():
         return
     if _update_em_andamento:
         return
+    # Lock file persistente — se update foi tentado nos ultimos 5min, nao tenta de novo
+    # Isso impede loop infinito quando o update falha em substituir o exe
+    lock_file = BASE_DIR / ".update_attempt.lock"
+    if lock_file.exists():
+        try:
+            idade = time.time() - lock_file.stat().st_mtime
+            if idade < 300:  # 5 minutos
+                return
+        except Exception:
+            pass
     try:
         req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
         with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx()) as r:
@@ -1024,6 +1034,11 @@ async def checar_atualizacao():
         url_nova = info.get("url", "")
         if not nova or not url_nova or nova == CURRENT_VERSION:
             return
+        # Marca tentativa de update no lock file
+        try:
+            lock_file.write_text(str(time.time()))
+        except Exception:
+            pass
         _update_em_andamento = True
         log.info(f"[UPDATE] Nova versao {nova} disponivel. Baixando...")
         threading.Thread(target=_baixar_e_aplicar_update, args=(nova, url_nova), daemon=True).start()
@@ -2620,36 +2635,38 @@ if __name__ == "__main__":
         import ctypes
 
         meu_pid = os.getpid()
+        meu_exe_nome = Path(sys.executable).name.lower()
 
-        # Mutex global — verifica ANTES de matar qualquer processo
-        # Evita que multiplas instancias passem ao mesmo tempo quando uma mata a outra
+        # Mata TODAS as outras instancias AgenteLocal* (versionadas ou nao) antes de iniciar.
+        # Isso resolve o problema de updates parciais que deixam multiplas instancias rodando.
+        # Mantem apenas o processo atual.
+        try:
+            r = subprocess.run(
+                ["wmic", "process", "where", "name like 'AgenteLocal%'",
+                 "get", "ProcessId,Name", r"\format:csv"],
+                capture_output=True, text=True, timeout=5
+            )
+            for linha in r.stdout.splitlines():
+                partes = [p.strip() for p in linha.split(",")]
+                if len(partes) >= 3:
+                    try:
+                        pid_outro = int(partes[-1])
+                        if pid_outro != meu_pid and pid_outro > 0:
+                            subprocess.run(["taskkill", "/F", "/PID", str(pid_outro)],
+                                           capture_output=True, timeout=4)
+                            log.info(f"[STARTUP] Matou instancia paralela PID={pid_outro}")
+                    except ValueError:
+                        continue
+        except Exception as e:
+            log.debug(f"[STARTUP] Erro ao limpar instancias: {e}")
+
+        time.sleep(2)  # aguarda processos morrerem antes de continuar
+
+        # Mutex global — segunda camada de protecao
         _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, True, "AgenteLocalMIA_SingleInstance")
         _mutex_err = ctypes.windll.kernel32.GetLastError()
-        if _mutex_err == 183:  # ERROR_ALREADY_EXISTS — ja tem uma instancia com o mutex
-            # Verifica se o processo que tem o mutex ainda esta vivo
-            # Se o outro processo for uma versao antiga (versionada), mata e assume
-            time.sleep(1)
-            _mutex_err2 = ctypes.windll.kernel32.GetLastError()
-            # Tenta matar processos versionados antigos (AgenteLocal_X.Y.exe) mas nao AgenteLocal.exe
-            try:
-                r = subprocess.run(
-                    ["wmic", "process", "where", "name like 'AgenteLocal_%'",
-                     "get", "ProcessId", r"\format:csv"],
-                    capture_output=True, text=True, timeout=5
-                )
-                for linha in r.stdout.splitlines():
-                    partes = [p.strip() for p in linha.split(",")]
-                    if len(partes) >= 2:
-                        try:
-                            pid_outro = int(partes[-1])
-                            if pid_outro != meu_pid and pid_outro > 0:
-                                subprocess.run(["taskkill", "/F", "/PID", str(pid_outro)],
-                                               capture_output=True, timeout=4)
-                        except ValueError:
-                            continue
-            except Exception:
-                pass
-            log.warning("[STARTUP] Outra instancia ja esta rodando. Encerrando.")
+        if _mutex_err == 183:  # ERROR_ALREADY_EXISTS
+            log.warning("[STARTUP] Outra instancia ainda detem o mutex apos limpeza. Encerrando.")
             sys.exit(0)
 
     log.info(f"=== Concentrador de Impressoes e Dispositivos v{CURRENT_VERSION} iniciando ===")
