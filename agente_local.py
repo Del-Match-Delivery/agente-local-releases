@@ -527,24 +527,49 @@ W=48
 TL={"counter":"BALCAO","dine_in":"MESA","takeaway":"RETIRADA","delivery":"ENTREGA","pickup":"RETIRADA","table":"MESA","balcao":"BALCAO","mesa":"MESA","retirada":"RETIRADA","entrega":"ENTREGA"}
 PL={"cash":"Dinheiro","credit":"Cartao Credito","debit":"Cartao Debito","pix":"PIX","card":"Cartao","money":"Dinheiro","creditcard":"Cartao Credito","debitcard":"Cartao Debito"}
 
+def _pedido_do_content(content):
+    """Retorna o objeto 'pedido' quando o servidor manda content aninhado.
+    Se o servidor manda content plano (formato antigo/achatado), retorna o proprio content."""
+    p = content.get("pedido")
+    return p if isinstance(p, dict) else content
+
 def _itens_do_content(content):
-    """Retorna lista de itens do content. Aceita 'itens' (novo servidor) ou 'items' (legado)."""
+    """Retorna lista de itens do content.
+    Aceita, em ordem:
+      1. content.pedido.itens / content.pedido.items (novo formato aninhado)
+      2. content.itens (formato novo achatado)
+      3. content.items (formato legado)
+    """
+    pedido = content.get("pedido")
+    if isinstance(pedido, dict):
+        itens = pedido.get("itens") or pedido.get("items")
+        if itens:
+            return itens
     return content.get("itens") or content.get("items") or []
 
 def _adicionais_do_item(item):
     """Retorna lista normalizada de adicionais.
-    Aceita 'adicionais' (novo servidor: {nome, preco_cents}) ou 'addons' (legado: {name, price_cents}).
+    Aceita 'adicionais' (novo servidor) ou 'addons' (legado).
+    Precos aceitos, em ordem: preco_cents -> priceCents (camelCase) -> price_cents (snake_case).
     Cada adicional retornado tem chaves 'nome' e 'preco_cents'.
     """
+    def _preco_adicional(a):
+        # Ordem de fallback: preco_cents (novo) -> priceCents (camelCase cru) -> price_cents (snake_case)
+        for k in ("preco_cents", "priceCents", "price_cents"):
+            v = a.get(k)
+            if v:
+                return v
+        return 0
+
     ads = item.get("adicionais")
     if isinstance(ads, list) and ads:
         return [{"nome": a.get("nome") or a.get("name",""),
-                 "preco_cents": a.get("preco_cents", a.get("price_cents", 0)) or 0}
+                 "preco_cents": _preco_adicional(a)}
                 for a in ads if a]
     ads = item.get("addons")
     if isinstance(ads, list) and ads:
         return [{"nome": a.get("name") or a.get("nome",""),
-                 "preco_cents": a.get("price_cents", a.get("preco_cents", 0)) or 0}
+                 "preco_cents": _preco_adicional(a)}
                 for a in ads if a]
     return []
 
@@ -561,8 +586,9 @@ def _nome_do_item(item):
     return item.get("nome") or item.get("name") or ""
 
 def _preco_do_item(item):
-    """Retorna preco unitario em centavos. Aceita 'preco_cents' (novo) ou 'unit_price_cents' (legado)."""
-    return item.get("preco_cents") or item.get("unit_price_cents") or 0
+    """Retorna preco unitario em centavos.
+    Aceita 'preco_cents' (novo), 'priceCents' (camelCase cru) ou 'unit_price_cents' (legado)."""
+    return item.get("preco_cents") or item.get("priceCents") or item.get("unit_price_cents") or 0
 
 def _li(q,n,p,w=None):
     w=w or W; b=f"[ {q}x ]  {n}"
@@ -572,6 +598,15 @@ def _li(q,n,p,w=None):
     return b+(" "*max(1,e))+pv if e>=1 else f"{b}\n{pv:>{w}}"
 
 def _fmt(content, jt, pt):
+    # Se o servidor mandar content aninhado ({pedido: {...}}), desembrulha campos do pedido
+    # para que o resto do codigo continue lendo do 'content' plano.
+    # Campos de nivel do content (auto_print, paper_width, company_name, etc.) tem prioridade
+    # sobre os campos de dentro do pedido (para nao sobrescrever config do restaurante).
+    _pedido = content.get("pedido")
+    if isinstance(_pedido, dict):
+        _merged = dict(_pedido)
+        _merged.update(content)  # content por cima — mantem tudo que ja veio no nivel de fora
+        content = _merged
     # Largura do papel: paper_width do content tem prioridade, default 48
     pw = content.get("paper_width")
     w = int(pw) if pw and str(pw).isdigit() else W
@@ -875,9 +910,13 @@ def proc_job(job):
     jid=job.get("id"); pt=job.get("printer_type","receipt")
     pid=job.get("printer_id")
     content=job.get("content",{}); copies=int(job.get("copies",1)); jt=job.get("job_type","order")
+    # Se content vier aninhado (pedido dentro), le tambem do pedido interno para logs
+    _pedido_obj = content.get("pedido") if isinstance(content.get("pedido"), dict) else {}
     # Extrai pedido/cliente do content para usar em logs e registros de falha
-    _pedido_ref = (content.get("numero","") or content.get("order_number","") or content.get("order_id","")[:8]) if content else ""
-    _cliente_ref = content.get("customer_name","") if content else ""
+    _pedido_ref = (content.get("numero","") or _pedido_obj.get("numero","")
+                   or content.get("order_number","") or _pedido_obj.get("order_number","")
+                   or content.get("order_id","")[:8]) if content else ""
+    _cliente_ref = (content.get("customer_name","") or _pedido_obj.get("customer_name","")) if content else ""
 
     # Se agente nao tem impressora mapeada para este tipo, ignora silenciosamente.
     # O servidor so deve mandar este job se este agente declarou a area — mas por seguranca
@@ -887,9 +926,13 @@ def proc_job(job):
         log.info(f"[PRINT] Job {jid} tipo={pt} — sem impressora mapeada neste agente, ignorando (outro agente processa)")
         return
     log.info(f"[PRINT] Job {jid} tipo={pt}")
-    oid=content.get("order_id") or content.get("id","")
-    _content_rico = (("items" in content and len(content.get("items") or []) > 0)
-                     or "paper_width" in content or "receipt_font_size" in content or "company_name" in content)
+    oid=content.get("order_id") or content.get("id","") or _pedido_obj.get("order_id","") or _pedido_obj.get("id","")
+    _content_rico = (
+        ("items" in content and len(content.get("items") or []) > 0)
+        or ("itens" in content and len(content.get("itens") or []) > 0)
+        or (isinstance(content.get("pedido"), dict) and len(_itens_do_content(content)) > 0)
+        or "paper_width" in content or "receipt_font_size" in content or "company_name" in content
+    )
     if oid and not _content_rico:
         p=ef_get_order(oid)
         if p:
@@ -1009,7 +1052,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.51"
+CURRENT_VERSION = "5.52"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

@@ -1,5 +1,5 @@
 {
-  "version": "5.51",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.51/AgenteLocal.exe",
-  "notes": "v5.51: Le todos os adicionais do novo formato do servidor (item.adicionais), com fallback para formato antigo (item.addons). Sem limite/filtro de adicionais."
+  "version": "5.52",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.52/AgenteLocal.exe",
+  "notes": "v5.52: Aceita content aninhado (content.pedido.itens) do servidor + fallback priceCents (camelCase) para preco de adicionais."
 }
