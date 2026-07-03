@@ -910,6 +910,17 @@ def proc_job(job):
     jid=job.get("id"); pt=job.get("printer_type","receipt")
     pid=job.get("printer_id")
     content=job.get("content",{}); copies=int(job.get("copies",1)); jt=job.get("job_type","order")
+
+    # NORMALIZACAO — o servidor pode mandar o job em 3 formatos:
+    #   A) agent-unified-poll (legado): job.content.items[] com addons_json/price_cents (ingles cru)
+    #   B) novo achatado:                job.content.itens[] com adicionais/preco_cents
+    #   C) novo aninhado (agent-jobs):   job.pedido.itens[] direto no raiz, SEM job.content
+    # Se detectar formato C (pedido no raiz do job), embrulha em content para o resto funcionar.
+    if isinstance(job.get("pedido"), dict) and not (content.get("items") or content.get("itens")):
+        # Formato C: pedido esta no raiz do job. Injetamos como content.pedido.
+        content = dict(content) if isinstance(content, dict) else {}
+        content["pedido"] = job["pedido"]
+
     # Se content vier aninhado (pedido dentro), le tambem do pedido interno para logs
     _pedido_obj = content.get("pedido") if isinstance(content.get("pedido"), dict) else {}
     # Extrai pedido/cliente do content para usar em logs e registros de falha
@@ -1052,7 +1063,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.52"
+CURRENT_VERSION = "5.53"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

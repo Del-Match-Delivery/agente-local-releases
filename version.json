@@ -1,5 +1,5 @@
 {
-  "version": "5.52",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.52/AgenteLocal.exe",
-  "notes": "v5.52: Aceita content aninhado (content.pedido.itens) do servidor + fallback priceCents (camelCase) para preco de adicionais."
+  "version": "5.53",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.53/AgenteLocal.exe",
+  "notes": "v5.53: Aceita formato agent-jobs (job.pedido.itens no raiz do job, sem content) — normaliza automaticamente para os 3 formatos possiveis do servidor."
 }
