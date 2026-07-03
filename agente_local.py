@@ -436,6 +436,9 @@ def _substituir_marcadores_escpos(texto):
     Otimizado: usa placeholders com bytes de controle raros, encoda em bloco (cp850),
     e substitui por bytes crus depois. Se nao houver marcador, retorna direto o encode.
     """
+    if not isinstance(texto, str):
+        # Blindagem: se por algum motivo veio None/bytes/outro tipo, converte
+        texto = str(texto) if texto is not None else ""
     if "[[BIG_ORDER_ON]]" not in texto:
         # Caminho rapido: sem marcador, encode direto em bloco
         return texto.encode("cp850", "replace")
@@ -539,55 +542,65 @@ def _itens_do_content(content):
       1. content.pedido.itens / content.pedido.items (novo formato aninhado)
       2. content.itens (formato novo achatado)
       3. content.items (formato legado)
+    Retorna [] se content for None/tipo errado ou nao houver itens.
     """
+    if not isinstance(content, dict): return []
     pedido = content.get("pedido")
     if isinstance(pedido, dict):
         itens = pedido.get("itens") or pedido.get("items")
-        if itens:
+        if isinstance(itens, list):
             return itens
-    return content.get("itens") or content.get("items") or []
+    itens = content.get("itens") or content.get("items")
+    return itens if isinstance(itens, list) else []
 
 def _adicionais_do_item(item):
     """Retorna lista normalizada de adicionais.
     Aceita 'adicionais' (novo servidor) ou 'addons' (legado).
     Precos aceitos, em ordem: preco_cents -> priceCents (camelCase) -> price_cents (snake_case).
     Cada adicional retornado tem chaves 'nome' e 'preco_cents'.
+    Retorna [] em qualquer situacao inesperada — nunca lanca excecao.
     """
+    if not isinstance(item, dict): return []
     def _preco_adicional(a):
-        # Ordem de fallback: preco_cents (novo) -> priceCents (camelCase cru) -> price_cents (snake_case)
+        if not isinstance(a, dict): return 0
         for k in ("preco_cents", "priceCents", "price_cents"):
             v = a.get(k)
             if v:
-                return v
+                try: return int(v)
+                except (TypeError, ValueError): return 0
         return 0
 
     ads = item.get("adicionais")
     if isinstance(ads, list) and ads:
-        return [{"nome": a.get("nome") or a.get("name",""),
+        return [{"nome": (a.get("nome") or a.get("name","")) if isinstance(a, dict) else "",
                  "preco_cents": _preco_adicional(a)}
-                for a in ads if a]
+                for a in ads if a and isinstance(a, dict)]
     ads = item.get("addons")
     if isinstance(ads, list) and ads:
-        return [{"nome": a.get("name") or a.get("nome",""),
+        return [{"nome": (a.get("name") or a.get("nome","")) if isinstance(a, dict) else "",
                  "preco_cents": _preco_adicional(a)}
-                for a in ads if a]
+                for a in ads if a and isinstance(a, dict)]
     return []
 
 def _obs_do_item(item):
     """Retorna observacao do item. Aceita 'obs' (novo servidor) ou 'notes' (legado)."""
+    if not isinstance(item, dict): return ""
     return item.get("obs") or item.get("notes") or ""
 
 def _qtd_do_item(item):
     """Retorna quantidade do item. Aceita 'qtd' (novo servidor), 'quantity' ou 'qty' (legado)."""
+    if not isinstance(item, dict): return 1
     return item.get("qtd") or item.get("quantity") or item.get("qty") or 1
 
 def _nome_do_item(item):
     """Retorna nome do item. Aceita 'nome' (novo servidor) ou 'name' (legado)."""
+    if not isinstance(item, dict): return ""
     return item.get("nome") or item.get("name") or ""
 
 def _preco_do_item(item):
     """Retorna preco unitario em centavos.
     Aceita 'preco_cents' (novo), 'priceCents' (camelCase cru) ou 'unit_price_cents' (legado)."""
+    if not isinstance(item, dict): return 0
     return item.get("preco_cents") or item.get("priceCents") or item.get("unit_price_cents") or 0
 
 def _li(q,n,p,w=None):
@@ -1002,7 +1015,27 @@ def proc_job(job):
             escpos_b64 = None  # forca fallback para texto abaixo
 
     if not escpos_b64:
-        texto=_fmt(content,jt,pt)
+        # Formatacao NUNCA pode impedir a impressao. Se _fmt levantar excecao (campo inesperadamente None,
+        # tipo diferente, etc.), imprime um cupom minimo com o que sabemos — melhor cupom incompleto que zero cupom.
+        try:
+            texto=_fmt(content,jt,pt)
+        except Exception as e:
+            log.error(f"[PRINT] Erro em _fmt para job {jid}: {e} — imprimindo cupom minimo", exc_info=True)
+            _num = (content.get("numero","") if isinstance(content, dict) else "") or _pedido_ref or "?"
+            _cli = _cliente_ref or ""
+            texto = (
+                f"{'='*W}\n"
+                f"PEDIDO #{_num}\n"
+                f"{('Cliente: '+_cli) if _cli else ''}\n"
+                f"Tipo: {pt}\n"
+                f"{'='*W}\n"
+                f"(Erro na formatacao — verifique o log)\n"
+                f"{'='*W}"
+            )
+            try:
+                _registrar_falha(jid, "erro_formatacao", str(e)[:300],
+                                 tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
+            except Exception: pass
         for _ in range(copies):
             r=_imprimir_com_roteamento(imp, texto)
             if not r.get("ok"):
@@ -1057,13 +1090,27 @@ def poll():
             jid = job["id"]
             _jobs_em_proc.add(jid)
             def _run(j=job):
-                try: proc_job(j)
-                finally: _jobs_em_proc.discard(j["id"])
+                _jid = j.get("id","?")
+                try:
+                    proc_job(j)
+                except Exception as e:
+                    # Excecao inesperada em proc_job — NUNCA deve deixar o job em 'sent' silenciosamente.
+                    # Marca failed no servidor para que possa ser reprocessado / visto pelo operador.
+                    log.error(f"[PRINT] Excecao ao processar job {_jid}: {e}", exc_info=True)
+                    try:
+                        ef_update_job(_jid, "failed", f"excecao_proc_job: {str(e)[:200]}")
+                    except Exception as e2:
+                        log.error(f"[PRINT] Nao conseguiu marcar job {_jid} como failed: {e2}")
+                    try:
+                        _registrar_falha(_jid, "excecao_proc_job", str(e)[:300], tipo=j.get("printer_type","?"))
+                    except Exception: pass
+                finally:
+                    _jobs_em_proc.discard(_jid)
             threading.Thread(target=_run, daemon=True).start()
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.53"
+CURRENT_VERSION = "5.54"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
