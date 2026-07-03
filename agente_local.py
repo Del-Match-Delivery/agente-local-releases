@@ -527,6 +527,43 @@ W=48
 TL={"counter":"BALCAO","dine_in":"MESA","takeaway":"RETIRADA","delivery":"ENTREGA","pickup":"RETIRADA","table":"MESA","balcao":"BALCAO","mesa":"MESA","retirada":"RETIRADA","entrega":"ENTREGA"}
 PL={"cash":"Dinheiro","credit":"Cartao Credito","debit":"Cartao Debito","pix":"PIX","card":"Cartao","money":"Dinheiro","creditcard":"Cartao Credito","debitcard":"Cartao Debito"}
 
+def _itens_do_content(content):
+    """Retorna lista de itens do content. Aceita 'itens' (novo servidor) ou 'items' (legado)."""
+    return content.get("itens") or content.get("items") or []
+
+def _adicionais_do_item(item):
+    """Retorna lista normalizada de adicionais.
+    Aceita 'adicionais' (novo servidor: {nome, preco_cents}) ou 'addons' (legado: {name, price_cents}).
+    Cada adicional retornado tem chaves 'nome' e 'preco_cents'.
+    """
+    ads = item.get("adicionais")
+    if isinstance(ads, list) and ads:
+        return [{"nome": a.get("nome") or a.get("name",""),
+                 "preco_cents": a.get("preco_cents", a.get("price_cents", 0)) or 0}
+                for a in ads if a]
+    ads = item.get("addons")
+    if isinstance(ads, list) and ads:
+        return [{"nome": a.get("name") or a.get("nome",""),
+                 "preco_cents": a.get("price_cents", a.get("preco_cents", 0)) or 0}
+                for a in ads if a]
+    return []
+
+def _obs_do_item(item):
+    """Retorna observacao do item. Aceita 'obs' (novo servidor) ou 'notes' (legado)."""
+    return item.get("obs") or item.get("notes") or ""
+
+def _qtd_do_item(item):
+    """Retorna quantidade do item. Aceita 'qtd' (novo servidor), 'quantity' ou 'qty' (legado)."""
+    return item.get("qtd") or item.get("quantity") or item.get("qty") or 1
+
+def _nome_do_item(item):
+    """Retorna nome do item. Aceita 'nome' (novo servidor) ou 'name' (legado)."""
+    return item.get("nome") or item.get("name") or ""
+
+def _preco_do_item(item):
+    """Retorna preco unitario em centavos. Aceita 'preco_cents' (novo) ou 'unit_price_cents' (legado)."""
+    return item.get("preco_cents") or item.get("unit_price_cents") or 0
+
 def _li(q,n,p,w=None):
     w=w or W; b=f"[ {q}x ]  {n}"
     total=int(q)*int(p) if p else 0
@@ -584,12 +621,12 @@ def _fmt(content, jt, pt):
         if ph and show_phone: ll.append(f"Tel: {ph}")
         ll.append(S)
         DP="·"*w
-        for item in content.get("items",[]):
-            ll.append(_li(item.get("quantity",1),item.get("name",""),item.get("unit_price_cents",0),w))
-            for a in item.get("addons",[]):
-                pc=a.get("price_cents",0)
-                ll.append(f"  + {a.get('name','')}{f' {_R(pc)}' if pc else ''}")
-            obs=item.get("notes","")
+        for item in _itens_do_content(content):
+            ll.append(_li(_qtd_do_item(item), _nome_do_item(item), _preco_do_item(item), w))
+            for a in _adicionais_do_item(item):
+                pc=a.get("preco_cents",0)
+                ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
+            obs=_obs_do_item(item)
             if obs: ll.append(f"  >> {obs}")
             ll.append(DP)
         ll.append(S)
@@ -654,10 +691,10 @@ def _fmt(content, jt, pt):
             # Fonte normal: comportamento original — tudo em string
             ll += cab
             DP="·"*w
-            for item in content.get("items",[]):
-                q=item.get("quantity",item.get("qty",1)); ll.append(f"[ {q}x ]  {item.get('name','')}")
-                for a in item.get("addons",[]): ll.append(f"  + {a.get('name','')}")
-                obs=item.get("notes","")
+            for item in _itens_do_content(content):
+                q=_qtd_do_item(item); ll.append(f"[ {q}x ]  {_nome_do_item(item)}")
+                for a in _adicionais_do_item(item): ll.append(f"  + {a.get('nome','')}")
+                obs=_obs_do_item(item)
                 if obs: ll.append(f"  >> {obs}")
                 ll.append(DP)
             obs2=content.get("notes","")
@@ -677,15 +714,15 @@ def _fmt(content, jt, pt):
                     parts.append(_substituir_marcadores_escpos(linha + "\n"))
                 else:
                     parts.append(enc(linha))
-            for item in content.get("items",[]):
-                q=item.get("quantity",item.get("qty",1))
-                nome=item.get("name","")
+            for item in _itens_do_content(content):
+                q=_qtd_do_item(item)
+                nome=_nome_do_item(item)
                 parts.append(FBIG)
                 parts.append(enc(f"[ {q}x ]  {nome}"))
                 parts.append(FNORMAL)
-                for a in item.get("addons",[]):
-                    parts.append(enc(f"  + {a.get('name','')}"))
-                obs=item.get("notes","")
+                for a in _adicionais_do_item(item):
+                    parts.append(enc(f"  + {a.get('nome','')}"))
+                obs=_obs_do_item(item)
                 if obs: parts.append(enc(f"  >> {obs}"))
                 parts.append(enc(DP_str))
             obs2=content.get("notes","")
@@ -716,12 +753,12 @@ def _fmt(content, jt, pt):
         if cod: ll.append(f"Codigo: {cod}".center(w))
         ll.append(S)
         DP="·"*w
-        for item in content.get("items",[]):
-            ll.append(_li(item.get("quantity",1),item.get("name",""),item.get("unit_price_cents",0),w))
-            for a in item.get("addons",[]):
-                pc=a.get("price_cents",0)
-                ll.append(f"  + {a.get('name','')}{f' {_R(pc)}' if pc else ''}")
-            obs=item.get("notes","")
+        for item in _itens_do_content(content):
+            ll.append(_li(_qtd_do_item(item), _nome_do_item(item), _preco_do_item(item), w))
+            for a in _adicionais_do_item(item):
+                pc=a.get("preco_cents",0)
+                ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
+            obs=_obs_do_item(item)
             if obs: ll.append(f"  >> {obs}")
             ll.append(DP)
         ll.append(S)
@@ -755,12 +792,12 @@ def _fmt(content, jt, pt):
         if t2 and show_phone: ll.append(f"Tel: {t2}")
         ll.append(S)
         DP="·"*w
-        for item in content.get("items",[]):
-            ll.append(_li(item.get("quantity",1),item.get("name",""),item.get("unit_price_cents",0),w))
-            for a in item.get("addons",[]):
-                pc=a.get("price_cents",0)
-                ll.append(f"  + {a.get('name','')}{f' {_R(pc)}' if pc else ''}")
-            obs=item.get("notes","")
+        for item in _itens_do_content(content):
+            ll.append(_li(_qtd_do_item(item), _nome_do_item(item), _preco_do_item(item), w))
+            for a in _adicionais_do_item(item):
+                pc=a.get("preco_cents",0)
+                ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
+            obs=_obs_do_item(item)
             if obs: ll.append(f"  >> {obs}")
             ll.append(DP)
         ll.append(S)
@@ -972,7 +1009,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.50"
+CURRENT_VERSION = "5.51"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
