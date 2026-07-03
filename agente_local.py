@@ -426,6 +426,28 @@ def _escpos_font_prefix():
         return b"\x1d\x21\x11"  # largura+altura duplos
     return b"\x1d\x21\x22"      # largura+altura triplos
 
+_ESCPOS_BIG_ON  = b"\x1b\x61\x01\x1b\x45\x01\x1d\x21\x11"  # center + bold on + 2x2
+_ESCPOS_BIG_OFF = b"\x1d\x21\x00\x1b\x45\x00\x1b\x61\x00"  # normal + bold off + left
+_MARCADOR_ON_PLACEHOLDER  = "\x01\x02BIG_ON\x02\x01"   # bytes de controle improváveis em texto real
+_MARCADOR_OFF_PLACEHOLDER = "\x01\x02BIG_OFF\x02\x01"
+
+def _substituir_marcadores_escpos(texto):
+    """Substitui marcadores '[[BIG_ORDER_ON]]' e '[[BIG_ORDER_OFF]]' por bytes ESC/POS reais.
+    Otimizado: usa placeholders com bytes de controle raros, encoda em bloco (cp850),
+    e substitui por bytes crus depois. Se nao houver marcador, retorna direto o encode.
+    """
+    if "[[BIG_ORDER_ON]]" not in texto:
+        # Caminho rapido: sem marcador, encode direto em bloco
+        return texto.encode("cp850", "replace")
+    # Substitui marcadores por placeholders que sobrevivem ao encode cp850
+    texto = texto.replace("[[BIG_ORDER_ON]]",  _MARCADOR_ON_PLACEHOLDER)
+    texto = texto.replace("[[BIG_ORDER_OFF]]", _MARCADOR_OFF_PLACEHOLDER)
+    dados = texto.encode("cp850", "replace")
+    # Troca placeholders pelos bytes ESC/POS
+    dados = dados.replace(_MARCADOR_ON_PLACEHOLDER.encode("cp850"),  _ESCPOS_BIG_ON)
+    dados = dados.replace(_MARCADOR_OFF_PLACEHOLDER.encode("cp850"), _ESCPOS_BIG_OFF)
+    return dados
+
 def _imprimir_raw(nome, conteudo):
     try:
         if HAS_WIN32:
@@ -436,7 +458,8 @@ def _imprimir_raw(nome, conteudo):
 
                 # Se for string, codifica com prefixo de tamanho de fonte. Se for bytes (RAW), envia direto.
                 if isinstance(conteudo, str):
-                    payload = _escpos_font_prefix() + (conteudo+"\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00").encode("cp850","replace")
+                    corpo = _substituir_marcadores_escpos(conteudo + "\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")
+                    payload = _escpos_font_prefix() + corpo
                     win32print.WritePrinter(h, payload)
                 else:
                     win32print.WritePrinter(h, conteudo)
@@ -459,7 +482,8 @@ def _imprimir_tcp(endereco, conteudo):
             host, porta = endereco, 9100
         with socket.create_connection((host, porta), timeout=10) as s:
             if isinstance(conteudo, str):
-                payload = _escpos_font_prefix() + (conteudo + "\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00").encode("cp850", "replace")
+                corpo = _substituir_marcadores_escpos(conteudo + "\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")
+                payload = _escpos_font_prefix() + corpo
             else:
                 payload = conteudo
             s.sendall(payload)
@@ -542,8 +566,10 @@ def _fmt(content, jt, pt):
         t=content.get("company_phone","")
         if t: ll.append(f"Tel: {t}".center(w))
         ll.append(S)
-        n=content.get("order_number","")
-        if n: ll.append(f"PEDIDO #{n}".center(w))
+        n=content.get("numero","") or content.get("order_number","")
+        if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
+        data_brt=content.get("created_at_brt","")
+        if data_brt: ll.append(f"Data: {data_brt}")
         tp=content.get("order_type","")
         if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
         c2=content.get("customer_name","")
@@ -603,8 +629,8 @@ def _fmt(content, jt, pt):
         # Cabecalho sempre em fonte normal para caber na largura do papel
         cab = []
         cab+=["*"*w, titulo.center(w), "*"*w]
-        n=content.get("order_number","")
-        if n: cab.append(f"PEDIDO #{n}".center(w))
+        n=content.get("numero","") or content.get("order_number","")
+        if n: cab.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
         tp=content.get("order_type","")
         if tp: cab.append(f"** {TL.get(tp,tp.upper())} **".center(w))
         m=content.get("table_number","")
@@ -612,11 +638,16 @@ def _fmt(content, jt, pt):
         c2=content.get("customer_name","")
         if c2: cab.append(f"Cliente: {c2}")
         if tipo=="kitchen":
-            try:
-                from datetime import datetime
-                dt=content.get("created_at","")
-                cab.append(f"Hora: {datetime.fromisoformat(dt.replace('Z','+00:00')).strftime('%H:%M')}")
-            except: pass
+            hora=content.get("hora_brt","")
+            if not hora:
+                # Fallback: converte created_at (jobs antigos)
+                try:
+                    from datetime import datetime
+                    dt=content.get("created_at","")
+                    if dt:
+                        hora=datetime.fromisoformat(dt.replace('Z','+00:00')).strftime('%H:%M')
+                except: pass
+            if hora: cab.append(f"Hora: {hora}")
         cab.append(S)
 
         if _fs <= 0:
@@ -641,7 +672,11 @@ def _fmt(content, jt, pt):
             parts = [FNORMAL]
             enc = lambda s: (s+"\n").encode("cp850","replace")
             for linha in cab:
-                parts.append(enc(linha))
+                if "[[BIG_ORDER_ON]]" in linha:
+                    # Substitui marcadores por bytes ESC/POS reais
+                    parts.append(_substituir_marcadores_escpos(linha + "\n"))
+                else:
+                    parts.append(enc(linha))
             for item in content.get("items",[]):
                 q=item.get("quantity",item.get("qty",1))
                 nome=item.get("name","")
@@ -667,8 +702,10 @@ def _fmt(content, jt, pt):
         e=content.get("company_address","")
         if e: ll.append(e.center(w))
         ll.append(S)
-        n=content.get("order_number","")
-        if n: ll.append(f"PEDIDO #{n}".center(w))
+        n=content.get("numero","") or content.get("order_number","")
+        if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
+        data_brt=content.get("created_at_brt","")
+        if data_brt: ll.append(f"Data: {data_brt}")
         tp=content.get("order_type","")
         if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
         c2=content.get("customer_name","")
@@ -706,8 +743,10 @@ def _fmt(content, jt, pt):
         e=content.get("company_address","")
         if e: ll.append(e.center(w))
         ll.append(S)
-        n=content.get("order_number","")
-        if n: ll.append(f"PEDIDO #{n}".center(w))
+        n=content.get("numero","") or content.get("order_number","")
+        if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
+        data_brt=content.get("created_at_brt","")
+        if data_brt: ll.append(f"Data: {data_brt}")
         tp=content.get("order_type","delivery")
         ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
         c2=content.get("customer_name","")
@@ -800,7 +839,7 @@ def proc_job(job):
     pid=job.get("printer_id")
     content=job.get("content",{}); copies=int(job.get("copies",1)); jt=job.get("job_type","order")
     # Extrai pedido/cliente do content para usar em logs e registros de falha
-    _pedido_ref = content.get("order_number","") or content.get("order_id","")[:8] if content else ""
+    _pedido_ref = (content.get("numero","") or content.get("order_number","") or content.get("order_id","")[:8]) if content else ""
     _cliente_ref = content.get("customer_name","") if content else ""
 
     # Se agente nao tem impressora mapeada para este tipo, ignora silenciosamente.
@@ -831,7 +870,7 @@ def proc_job(job):
                     for it in raw_items
                 ]
             # Atualiza referencia de pedido/cliente apos buscar dados completos
-            _pedido_ref = content.get("order_number","") or oid[:8]
+            _pedido_ref = content.get("numero","") or content.get("order_number","") or oid[:8]
             _cliente_ref = content.get("customer_name","") or _cliente_ref
             log.info("[ORDER] OK")
         else:
@@ -884,7 +923,7 @@ def proc_job(job):
                 
     ef_update_job(jid,"printed",pa=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()))
     nome_imp = imp.get("nome_impressora") or imp.get("endereco_ip","")
-    pedido_num = (content.get("order_number","") if content else "") or (content.get("order_id","")[:8] if content else "")
+    pedido_num = (content.get("numero","") or content.get("order_number","") if content else "") or (content.get("order_id","")[:8] if content else "")
     cliente = (content.get("customer_name","") if content else "") or ""
     log.info(f"[PRINT] Job {jid} OK | tipo={pt} | pedido={pedido_num} | cliente={cliente} | impressora='{nome_imp}'")
     _stats["total_impressos"] += 1
@@ -906,7 +945,7 @@ def proc_job(job):
         "tipo": pt,
         "job_id": jid,
         "order_id": _oid_real,
-        "content_ref": (content.get("order_number","") or _oid_real[:8]) if content else "",
+        "content_ref": (content.get("numero","") or content.get("order_number","") or _oid_real[:8]) if content else "",
         "cliente": cliente,
     }
     _stats["historico"].insert(0, entrada)
@@ -933,7 +972,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.49"
+CURRENT_VERSION = "5.50"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos

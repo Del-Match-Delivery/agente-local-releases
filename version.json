@@ -1,5 +1,5 @@
 {
-  "version": "5.49",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.49/AgenteLocal.exe",
-  "notes": "v5.49: Botoes do rodape sempre visiveis (Salvar/Cancelar/Status/Log), salvamento automatico ao fechar janela pelo X."
+  "version": "5.50",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.50/AgenteLocal.exe",
+  "notes": "v5.50: Numero do pedido em fonte grande (2x2 negrito centralizado) + Data/Hora em horario de Brasilia direto do servidor (sem conversao de fuso)."
 }
