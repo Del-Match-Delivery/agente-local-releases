@@ -1,5 +1,5 @@
 {
-  "version": "5.54",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.54/AgenteLocal.exe",
-  "notes": "v5.54: Robustez ponta-a-ponta — excecao em proc_job vira failed no servidor; erro em _fmt imprime cupom minimo em vez de abortar; helpers protegidos contra None/tipos invalidos."
+  "version": "5.55",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.55/AgenteLocal.exe",
+  "notes": "v5.55: Corrige erro 'base_library.zip not found' — runtime extraction em pasta persistente (%LOCALAPPDATA%/AgenteLocalMIA/runtime), imune a limpeza de Temp/antivirus."
 }
