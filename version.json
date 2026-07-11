@@ -1,5 +1,5 @@
 {
-  "version": "5.56",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.56/AgenteLocal.exe",
-  "notes": "v5.56: Imprime observacao de entrega (delivery_notes) abaixo do endereco. Inclui o fix de runtime da v5.55 (base_library.zip em pasta persistente)."
+  "version": "5.57",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.57/AgenteLocal.exe",
+  "notes": "v5.57: Corrige cupom de delivery que saia sem endereco (nomes de campo divergentes do servidor). Endereco agora sai a partir de qualquer nome provavel de campo."
 }
