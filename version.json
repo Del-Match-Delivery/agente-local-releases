@@ -1,5 +1,5 @@
 {
-  "version": "5.58",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.58/AgenteLocal.exe",
-  "notes": "v5.58: A sincronizacao nao sobrescreve mais a area/tipo configurados manualmente. A area salva pelo usuario fica salva para sempre."
+  "version": "5.60",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.60/AgenteLocal.exe",
+  "notes": "v5.60: Impressora area=caixa imprime tudo como cupom completo (inclusive itens de cozinha/bar). Roteamento por printer_id corrigido para varias impressoras na mesma area."
 }
