@@ -1,5 +1,5 @@
 {
-  "version": "5.61",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.61/AgenteLocal.exe",
-  "notes": "v5.61: Job de impressao sai em TODAS as impressoras da mesma funcao (ex: 2 impressoras de caixa imprimem o mesmo cupom). Com printer_id especifico, so naquela impressora."
+  "version": "5.62",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.62/AgenteLocal.exe",
+  "notes": "v5.62: Corrige cupom de delivery que saia sem o numero da casa. O numero agora sempre aparece quando disponivel no pedido."
 }
