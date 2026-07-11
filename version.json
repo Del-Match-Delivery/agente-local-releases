@@ -1,5 +1,5 @@
 {
-  "version": "5.60",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.60/AgenteLocal.exe",
-  "notes": "v5.60: Impressora area=caixa imprime tudo como cupom completo (inclusive itens de cozinha/bar). Roteamento por printer_id corrigido para varias impressoras na mesma area."
+  "version": "5.61",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.61/AgenteLocal.exe",
+  "notes": "v5.61: Job de impressao sai em TODAS as impressoras da mesma funcao (ex: 2 impressoras de caixa imprimem o mesmo cupom). Com printer_id especifico, so naquela impressora."
 }
