@@ -1,5 +1,5 @@
 {
-  "version": "5.55",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.55/AgenteLocal.exe",
-  "notes": "v5.55: Corrige erro 'base_library.zip not found' — runtime extraction em pasta persistente (%LOCALAPPDATA%/AgenteLocalMIA/runtime), imune a limpeza de Temp/antivirus."
+  "version": "5.56",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.56/AgenteLocal.exe",
+  "notes": "v5.56: Imprime observacao de entrega (delivery_notes) abaixo do endereco. Inclui o fix de runtime da v5.55 (base_library.zip em pasta persistente)."
 }
