@@ -358,9 +358,15 @@ def sincronizar_impressoras():
                          or imps_atuais_tipo.get(ts))
             if existente:
                 imp = dict(existente)
-                imp["nome"] = ns  # atualiza nome para o do servidor
-                imp["area"] = area_servidor
-                imp["printer_type"] = ts
+                imp["nome"] = ns  # atualiza nome (label) para o do servidor
+                # PRESERVA area/printer_type configurados MANUALMENTE pelo usuario.
+                # A sincronizacao NUNCA sobrescreve a area/tipo que o usuario ja salvou —
+                # ex: usuario poe a Cozinha como area=caixa de proposito (imprime cupom completo).
+                # So usa a sugestao do servidor se o campo estiver vazio na config local.
+                if not str(existente.get("area","")).strip():
+                    imp["area"] = area_servidor
+                if not str(existente.get("printer_type","")).strip():
+                    imp["printer_type"] = ts
                 # Se nome_impressora estava vazio, tenta match automatico agora
                 if not imp.get("nome_impressora"):
                     match = _auto_match(ns)
@@ -1167,7 +1173,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.57"
+CURRENT_VERSION = "5.58"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
