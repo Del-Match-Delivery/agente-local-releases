@@ -1,5 +1,5 @@
 {
-  "version": "5.57",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.57/AgenteLocal.exe",
-  "notes": "v5.57: Corrige cupom de delivery que saia sem endereco (nomes de campo divergentes do servidor). Endereco agora sai a partir de qualquer nome provavel de campo."
+  "version": "5.58",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.58/AgenteLocal.exe",
+  "notes": "v5.58: A sincronizacao nao sobrescreve mais a area/tipo configurados manualmente. A area salva pelo usuario fica salva para sempre."
 }
