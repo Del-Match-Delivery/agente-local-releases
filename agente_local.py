@@ -514,7 +514,20 @@ def _res_imp_por_rede(pt, printer_id=None):
                 area_imp = imp.get("area", "").strip().lower()
                 if not area_imp or area_imp in areas_pt:
                     return imp
-    # Fallback: config legada (impressoras na raiz) — ja filtra por area do agente
+    # Fallback: config legada (impressoras na raiz do cfg)
+    imps_legado = cfg.get("impressoras", [])
+    # Se veio printer_id, tenta casar com a impressora especifica ANTES de cair na 1a da area.
+    # Isso corrige o roteamento quando ha varias impressoras na mesma area (ex: 2x caixa):
+    # o printer_id era ignorado e tudo caia sempre na primeira.
+    if printer_id:
+        pid_norm = str(printer_id).strip().lower()
+        for i in imps_legado:
+            if (str(i.get("id","")).strip().lower() == pid_norm
+                    or str(i.get("nome","")).strip().lower() == pid_norm
+                    or str(i.get("nome_impressora","")).strip().lower() == pid_norm):
+                if i.get("nome_impressora","") or i.get("endereco_ip",""):
+                    return dict(i) if "tipo" in i else {**i, "tipo": i.get("tipo","comum_win32")}
+    # Sem printer_id (ou nao encontrado): 1a impressora da area do agente
     nome = _res_imp(pt)
     if nome:
         return {"nome_impressora": nome, "tipo": "comum_win32"}
@@ -1195,7 +1208,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.59"
+CURRENT_VERSION = "5.60"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
