@@ -706,6 +706,9 @@ def _fmt(content, jt, pt):
             ref=content.get("delivery_address_reference","")
             if city: ll.append(city)
             if ref: ll.append(f"Ref: {ref}")
+            # Observacao para o entregador (ex: "Apto 42, portao azul")
+            dnotes=content.get("delivery_notes","")
+            if dnotes: ll.append(f"Obs entrega: {dnotes}")
         rod=content.get("footer_message","")
         if rod: ll.append(S); ll.append(rod.center(w))
         ll.append(S)
@@ -874,6 +877,9 @@ def _fmt(content, jt, pt):
             ref=content.get("delivery_address_reference","")
             if city: ll.append(city)
             if ref: ll.append(f"Ref: {ref}")
+            # Observacao para o entregador (ex: "Apto 42, portao azul")
+            dnotes=content.get("delivery_notes","")
+            if dnotes: ll.append(f"Obs entrega: {dnotes}")
         ll.append(S)
     elif tipo=="command":
         if content.get("command")=="open_drawer": return "\x1b\x70\x00\x19\xfa"
@@ -1110,7 +1116,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.55"
+CURRENT_VERSION = "5.56"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
