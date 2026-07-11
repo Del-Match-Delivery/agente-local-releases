@@ -706,13 +706,22 @@ def _bloco_endereco(content, w, titulo="ENTREGA:"):
     def g(*nomes):
         return _campo(src, *nomes)
 
+    # Numero da casa — pode vir separado mesmo quando ha string pronta.
+    num = g("delivery_number", "delivery_address_number", "number", "numero", "numero_casa", "house_number")
     if addr:
         linhas.append(addr)
+        # Se a string pronta NAO contem o numero da casa, imprime o numero em linha propria.
+        # Corrige jobs que saiam sem o numero quando delivery_address vinha sem numero mas
+        # delivery_number estava preenchido em campo separado. Linha rotulada = sempre legivel,
+        # independente do formato da string.
+        import re as _re
+        _tem_num = bool(num) and _re.search(r'\b' + _re.escape(str(num)) + r'\b', addr)
+        if num and not _tem_num:
+            linhas.append(f"Numero: {num}")
     else:
         # 2/3) Monta rua + numero a partir de campos separados (com e sem prefixo)
         rua = g("delivery_address_street", "delivery_street", "street", "logradouro", "rua",
                 "delivery_address_line1", "line1")
-        num = g("delivery_number", "delivery_address_number", "number", "numero")
         if rua:
             linhas.append(f"{rua}, {num}" if num else rua)
 
@@ -1279,7 +1288,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.61"
+CURRENT_VERSION = "5.62"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
