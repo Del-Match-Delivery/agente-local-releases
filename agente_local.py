@@ -1005,6 +1005,25 @@ def proc_job(job):
                    or content.get("order_id","")[:8]) if content else ""
     _cliente_ref = (content.get("customer_name","") or _pedido_obj.get("customer_name","")) if content else ""
 
+    # CONTORNO (v5.59): impressora de caixa "absorve" jobs de cozinha/bar como CUPOM.
+    # Caso de uso: o lojista quer que a impressora do caixa imprima TUDO como cupom completo
+    # (precos/total/endereco), inclusive itens que o servidor carimbou como kitchen/bar
+    # (destino do produto no cardapio). Se o agente TEM impressora de caixa/receipt mas NAO
+    # tem impressora para o tipo original (kitchen/bar), reescreve o job para receipt/order.
+    # Assim o job nao e ignorado, e roteado para a caixa e sai como cupom (nao comanda).
+    # NAO dispara se o agente tiver impressora propria de cozinha/bar — nesse caso o job vai
+    # normalmente para ela como comanda.
+    _forcar_cupom = False
+    if pt in ("kitchen","bar") and not _agente_cobre_tipo(pt) and _agente_cobre_tipo("receipt"):
+        log.info(f"[PRINT] Job {jid} veio como '{pt}' e o agente so tem impressora de caixa "
+                 f"— absorvendo como CUPOM (receipt)")
+        pt = "receipt"
+        jt = "order"
+        _forcar_cupom = True
+        if isinstance(content, dict):
+            content = dict(content)
+            content["type"] = "order"  # controla o layout em _fmt (cupom completo)
+
     # Se agente nao tem impressora mapeada para este tipo, ignora silenciosamente.
     # O servidor so deve mandar este job se este agente declarou a area — mas por seguranca
     # (ex: job chegou antes do poll com areas atualizado), nao marca failed para nao perder o job.
@@ -1058,8 +1077,11 @@ def proc_job(job):
 
     nome_imp_local = imp.get("nome_impressora") or imp.get("endereco_ip","")
 
-    # PRIORIDADE: Usa dados formatados do servidor (ESC/POS RAW) se existirem
-    escpos_b64 = job.get("escpos_data")
+    # PRIORIDADE: Usa dados formatados do servidor (ESC/POS RAW) se existirem.
+    # Se o job foi absorvido como cupom (_forcar_cupom, contorno area=caixa no inicio de proc_job),
+    # IGNORA o escpos_data — o RAW do servidor seria a comanda de cozinha ja renderizada, entao
+    # reformatamos via _fmt para sair como cupom.
+    escpos_b64 = None if _forcar_cupom else job.get("escpos_data")
     if escpos_b64:
         import base64
         try:
@@ -1173,7 +1195,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.58"
+CURRENT_VERSION = "5.59"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
