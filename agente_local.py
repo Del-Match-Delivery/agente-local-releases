@@ -610,6 +610,84 @@ def _li(q,n,p,w=None):
     pv=_R(total); e=w-len(b)-len(pv)
     return b+(" "*max(1,e))+pv if e>=1 else f"{b}\n{pv:>{w}}"
 
+def _campo(content, *nomes):
+    """Retorna o primeiro campo nao-vazio dentre varios nomes possiveis. Blindado contra None."""
+    if not isinstance(content, dict): return ""
+    for n in nomes:
+        v = content.get(n)
+        if v not in (None, "", [], {}):
+            return str(v).strip()
+    return ""
+
+def _bloco_endereco(content, w, titulo="ENTREGA:"):
+    """Monta o bloco de endereco de entrega a partir de QUALQUER nome de campo provavel.
+    Cobre 3 situacoes:
+      1. String pronta em delivery_address (ou variantes de nome).
+      2. Endereco aninhado como objeto: delivery_address = {street, number, ...}.
+      3. Campos separados no nivel do content, com ou sem prefixo (delivery_address_* / delivery_*).
+    Retorna [] se realmente nao houver nenhum dado de endereco.
+    Nunca lanca excecao — na duvida, retorna o que conseguiu montar.
+    """
+    if not isinstance(content, dict): return []
+    S = "-"*w
+    linhas = []
+
+    # 1) String pronta (varios nomes possiveis que o servidor pode usar)
+    addr = _campo(content, "delivery_address", "delivery_address_street",
+                  "delivery_street", "address", "endereco", "endereco_entrega",
+                  "delivery_address_line1", "delivery_address_full")
+    # Se delivery_address veio como objeto/dict (endereco aninhado), trata como campos separados
+    _addr_obj = content.get("delivery_address")
+    if isinstance(_addr_obj, dict):
+        addr = ""  # ignora a string; vamos montar a partir do objeto abaixo
+        src = _addr_obj
+    else:
+        src = content
+
+    def g(*nomes):
+        return _campo(src, *nomes)
+
+    if addr:
+        linhas.append(addr)
+    else:
+        # 2/3) Monta rua + numero a partir de campos separados (com e sem prefixo)
+        rua = g("delivery_address_street", "delivery_street", "street", "logradouro", "rua",
+                "delivery_address_line1", "line1")
+        num = g("delivery_number", "delivery_address_number", "number", "numero")
+        if rua:
+            linhas.append(f"{rua}, {num}" if num else rua)
+
+    # Complemento
+    comp = g("delivery_address_complement", "delivery_complement", "complement",
+             "complemento", "delivery_address_line2", "line2")
+    if comp: linhas.append(comp)
+    # Bairro
+    bairro = g("delivery_address_neighborhood", "delivery_neighborhood", "delivery_address_district",
+               "neighborhood", "bairro", "district")
+    if bairro: linhas.append(bairro)
+    # Cidade + estado
+    city = g("delivery_address_city", "delivery_city", "city", "cidade")
+    uf = g("delivery_address_state", "delivery_state", "state", "estado", "uf")
+    if city:
+        linhas.append(f"{city} - {uf}" if uf else city)
+    elif uf:
+        linhas.append(uf)
+    # CEP
+    cep = g("delivery_address_postal_code", "delivery_postal_code", "postal_code",
+            "cep", "zipcode", "zip")
+    if cep: linhas.append(f"CEP: {cep}")
+    # Referencia
+    ref = g("delivery_address_reference", "delivery_reference", "reference", "referencia", "ponto_referencia")
+    if ref: linhas.append(f"Ref: {ref}")
+    # Observacao para o entregador (nivel do content, nao do objeto de endereco)
+    dnotes = _campo(content, "delivery_notes", "delivery_note", "delivery_instructions",
+                    "obs_entrega", "observacao_entrega")
+    if dnotes: linhas.append(f"Obs entrega: {dnotes}")
+
+    if not linhas:
+        return []
+    return [S, titulo.center(w)] + linhas
+
 def _fmt(content, jt, pt):
     # Se o servidor mandar content aninhado ({pedido: {...}}), desembrulha campos do pedido
     # para que o resto do codigo continue lendo do 'content' plano.
@@ -693,22 +771,8 @@ def _fmt(content, jt, pt):
         if cod: ll.append("="*w); ll.append(f"RETIRADA: {cod}".center(w)); ll.append("="*w)
         obs2=content.get("notes","")
         if obs2: ll.append(S); ll.append(f"Obs: {obs2}")
-        # Endereço de entrega (delivery)
-        addr=content.get("delivery_address","") or content.get("delivery_address_street","")
-        if addr:
-            ll.append(S); ll.append("ENTREGA:".center(w))
-            ll.append(addr)
-            comp=content.get("delivery_address_complement","")
-            if comp: ll.append(comp)
-            bairro=content.get("delivery_address_neighborhood","") or content.get("delivery_address_district","")
-            if bairro: ll.append(bairro)
-            city=content.get("delivery_address_city","")
-            ref=content.get("delivery_address_reference","")
-            if city: ll.append(city)
-            if ref: ll.append(f"Ref: {ref}")
-            # Observacao para o entregador (ex: "Apto 42, portao azul")
-            dnotes=content.get("delivery_notes","")
-            if dnotes: ll.append(f"Obs entrega: {dnotes}")
+        # Endereço de entrega (delivery) — bloco robusto que aceita varios nomes de campo
+        ll += _bloco_endereco(content, w, titulo="ENTREGA:")
         rod=content.get("footer_message","")
         if rod: ll.append(S); ll.append(rod.center(w))
         ll.append(S)
@@ -865,21 +929,8 @@ def _fmt(content, jt, pt):
         if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
         obs2=content.get("notes","")
         if obs2: ll.append(S); ll.append(f"Obs: {obs2}")
-        # Endereço de entrega
-        addr=content.get("delivery_address","") or content.get("delivery_address_street","")
-        if addr:
-            ll.append(S); ll.append("ENDERECO:".center(w)); ll.append(addr)
-            comp=content.get("delivery_address_complement","")
-            if comp: ll.append(comp)
-            bairro=content.get("delivery_address_neighborhood","") or content.get("delivery_address_district","")
-            if bairro: ll.append(bairro)
-            city=content.get("delivery_address_city","")
-            ref=content.get("delivery_address_reference","")
-            if city: ll.append(city)
-            if ref: ll.append(f"Ref: {ref}")
-            # Observacao para o entregador (ex: "Apto 42, portao azul")
-            dnotes=content.get("delivery_notes","")
-            if dnotes: ll.append(f"Obs entrega: {dnotes}")
+        # Endereço de entrega — bloco robusto que aceita varios nomes de campo
+        ll += _bloco_endereco(content, w, titulo="ENDERECO:")
         ll.append(S)
     elif tipo=="command":
         if content.get("command")=="open_drawer": return "\x1b\x70\x00\x19\xfa"
@@ -1116,7 +1167,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.56"
+CURRENT_VERSION = "5.57"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
