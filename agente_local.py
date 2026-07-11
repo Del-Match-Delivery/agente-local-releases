@@ -533,6 +533,46 @@ def _res_imp_por_rede(pt, printer_id=None):
         return {"nome_impressora": nome, "tipo": "comum_win32"}
     return None
 
+def _chave_imp(imp):
+    """Chave unica de uma impressora fisica (para nao imprimir 2x na mesma).
+    Usa nome_impressora (driver Windows) ou endereco_ip (rede)."""
+    return (str(imp.get("nome_impressora","")).strip().lower()
+            or str(imp.get("endereco_ip","")).strip().lower())
+
+def _res_todas_imp_por_tipo(pt):
+    """Retorna TODAS as impressoras ativas cuja area/tipo casa com o printer_type pt.
+    Usado para espalhar um job em todas as impressoras da mesma funcao (ex: 2x caixa).
+    Deduplica por impressora fisica (nome/ip) — a mesma impressora nunca entra 2x.
+    So inclui impressoras com destino real (nome_impressora ou endereco_ip preenchido)."""
+    areas_pt = _areas_para_tipo(pt)
+    resultado = []
+    vistos = set()
+
+    def _considerar(imp):
+        # Casa por area (caixa/cozinha/...) OU por printer_type exato
+        area_imp = str(imp.get("area","")).strip().lower()
+        ptype = str(imp.get("printer_type","")).strip()
+        if not (area_imp in areas_pt or ptype == pt):
+            return
+        if not (imp.get("nome_impressora","") or imp.get("endereco_ip","")):
+            return  # sem destino fisico mapeado — ignora
+        chave = _chave_imp(imp)
+        if not chave or chave in vistos:
+            return
+        vistos.add(chave)
+        # Normaliza 'tipo' (comum_win32/rede) para o roteamento
+        imp_norm = dict(imp) if "tipo" in imp else {**imp, "tipo": imp.get("tipo","comum_win32")}
+        resultado.append(imp_norm)
+
+    # Impressoras em redes configuradas
+    for rede in cfg.get("redes", []):
+        for imp in rede.get("impressoras", []):
+            _considerar(imp)
+    # Impressoras na config legada (raiz)
+    for imp in cfg.get("impressoras", []):
+        _considerar(imp)
+    return resultado
+
 def _imprimir_com_roteamento(imp, conteudo):
     """Roteia impressão: driver Windows (comum_win32) ou TCP direto (rede)."""
     tipo = imp.get("tipo", "comum_win32")
@@ -1079,49 +1119,58 @@ def proc_job(job):
                              tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
             # NAO retorna — continua com o content original para garantir que o job sai na impressora
 
-    # Resolve impressora com suporte a multi-rede
-    imp = _res_imp_por_rede(pt, printer_id=pid)
-    if not imp:
+    # Resolve as impressoras-alvo:
+    #  - printer_id PREENCHIDO -> alvo explicito, imprime SO naquela impressora (nao espalha).
+    #  - printer_id NULL       -> espalha: imprime em TODAS as impressoras da funcao (ex: 2x caixa).
+    #    Se nenhuma casar a funcao, cai no fallback _res_imp_por_rede (comportamento historico,
+    #    ex: job orfao vai pra 1a impressora / padrao).
+    if pid:
+        _uma = _res_imp_por_rede(pt, printer_id=pid)
+        imps_alvo = [_uma] if _uma else []
+    else:
+        imps_alvo = _res_todas_imp_por_tipo(pt)
+        if not imps_alvo:
+            _uma = _res_imp_por_rede(pt, printer_id=None)
+            imps_alvo = [_uma] if _uma else []
+
+    if not imps_alvo:
         msg = f"Sem impressora configurada para tipo '{pt}'"
         ef_update_job(jid,"failed", msg)
         _registrar_falha(jid, "impressora_nao_encontrada", msg,
                          tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
         return
 
+    if len(imps_alvo) > 1:
+        log.info(f"[PRINT] Job {jid} tipo={pt} sera impresso em {len(imps_alvo)} impressoras: "
+                 f"{[ (i.get('nome_impressora') or i.get('endereco_ip','')) for i in imps_alvo ]}")
+
+    # Primeira impressora usada para logs/registro de falha (compat com codigo existente)
+    imp = imps_alvo[0]
     nome_imp_local = imp.get("nome_impressora") or imp.get("endereco_ip","")
 
-    # PRIORIDADE: Usa dados formatados do servidor (ESC/POS RAW) se existirem.
-    # Se o job foi absorvido como cupom (_forcar_cupom, contorno area=caixa no inicio de proc_job),
-    # IGNORA o escpos_data — o RAW do servidor seria a comanda de cozinha ja renderizada, entao
-    # reformatamos via _fmt para sair como cupom.
+    # Prepara o CONTEUDO a imprimir UMA vez (mesmo conteudo vai para todas as impressoras da funcao).
+    # PRIORIDADE: dados formatados do servidor (ESC/POS RAW) se existirem.
+    # Se o job foi absorvido como cupom (_forcar_cupom), IGNORA o escpos_data (seria a comanda ja
+    # renderizada) e reformatamos via _fmt para sair como cupom.
     escpos_b64 = None if _forcar_cupom else job.get("escpos_data")
+    dados = None  # conteudo final (bytes RAW ou str de texto)
     if escpos_b64:
         import base64
         try:
-            dados_brutos = base64.b64decode(escpos_b64)
+            dados = base64.b64decode(escpos_b64)
             log.info(f"[PRINT] Usando layout RAW para Job {jid}")
-            for _ in range(copies):
-                r = _imprimir_com_roteamento(imp, dados_brutos)
-                if not r.get("ok"):
-                    ef_update_job(jid, "failed", r.get("erro",""))
-                    _registrar_falha(jid, "erro_impressora", r.get("erro",""),
-                                     tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref,
-                                     impressora=nome_imp_local)
-                    return
         except Exception as e:
             log.error(f"[PRINT] Erro ao decodificar ESC/POS: {e} — tentando imprimir como texto")
-            escpos_b64 = None  # forca fallback para texto abaixo
-
-    if not escpos_b64:
-        # Formatacao NUNCA pode impedir a impressao. Se _fmt levantar excecao (campo inesperadamente None,
-        # tipo diferente, etc.), imprime um cupom minimo com o que sabemos — melhor cupom incompleto que zero cupom.
+            dados = None
+    if dados is None:
+        # Formatacao NUNCA pode impedir a impressao. Se _fmt levantar excecao, imprime um cupom minimo.
         try:
-            texto=_fmt(content,jt,pt)
+            dados=_fmt(content,jt,pt)
         except Exception as e:
             log.error(f"[PRINT] Erro em _fmt para job {jid}: {e} — imprimindo cupom minimo", exc_info=True)
             _num = (content.get("numero","") if isinstance(content, dict) else "") or _pedido_ref or "?"
             _cli = _cliente_ref or ""
-            texto = (
+            dados = (
                 f"{'='*W}\n"
                 f"PEDIDO #{_num}\n"
                 f"{('Cliente: '+_cli) if _cli else ''}\n"
@@ -1134,15 +1183,37 @@ def proc_job(job):
                 _registrar_falha(jid, "erro_formatacao", str(e)[:300],
                                  tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
             except Exception: pass
+
+    # IMPRIME em CADA impressora-alvo (espalhamento por funcao). copies = vias na MESMA impressora.
+    # Politica de erro: registra falha da impressora que falhou, mas CONTINUA nas outras — nao perde
+    # as que funcionam. Marca o job 'failed' no servidor SO se NENHUMA impressora imprimiu.
+    sucessos = 0
+    falhas_imp = []
+    for _imp in imps_alvo:
+        _nome = _imp.get("nome_impressora") or _imp.get("endereco_ip","")
+        ok_imp = True
         for _ in range(copies):
-            r=_imprimir_com_roteamento(imp, texto)
+            r = _imprimir_com_roteamento(_imp, dados)
             if not r.get("ok"):
-                ef_update_job(jid,"failed",r.get("erro",""))
+                ok_imp = False
+                falhas_imp.append((_nome, r.get("erro","")))
                 _registrar_falha(jid, "erro_impressora", r.get("erro",""),
                                  tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref,
-                                 impressora=nome_imp_local)
-                return
-                
+                                 impressora=_nome)
+                break  # nao insiste nas outras vias desta impressora
+        if ok_imp:
+            sucessos += 1
+
+    if sucessos == 0:
+        # Nenhuma impressora imprimiu — job falhou de verdade.
+        _err = falhas_imp[0][1] if falhas_imp else "falha desconhecida na impressao"
+        ef_update_job(jid,"failed", _err)
+        return
+
+    # Pelo menos uma via saiu. Confirma o job UMA VEZ (o job e 1, foram N vias fisicas).
+    if falhas_imp:
+        log.warning(f"[PRINT] Job {jid} impresso em {sucessos}/{len(imps_alvo)} impressoras — "
+                    f"falharam: {[f[0] for f in falhas_imp]}")
     ef_update_job(jid,"printed",pa=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()))
     nome_imp = imp.get("nome_impressora") or imp.get("endereco_ip","")
     pedido_num = (content.get("numero","") or content.get("order_number","") if content else "") or (content.get("order_id","")[:8] if content else "")
@@ -1208,7 +1279,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.60"
+CURRENT_VERSION = "5.61"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
