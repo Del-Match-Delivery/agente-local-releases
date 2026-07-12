@@ -1,5 +1,5 @@
 {
-  "version": "5.62",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.62/AgenteLocal.exe",
-  "notes": "v5.62: Corrige cupom de delivery que saia sem o numero da casa. O numero agora sempre aparece quando disponivel no pedido."
+  "version": "5.63",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.63/AgenteLocal.exe",
+  "notes": "v5.63: Adicionais impressos mesmo quando servidor manda em addons_json/selections_json/customizations_json (fallback entre 5 chaves) + aceita aliases de nome (name/addon_name/option_name/label/title) e preco (unit_price_cents)."
 }

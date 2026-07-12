@@ -614,31 +614,41 @@ def _itens_do_content(content):
 
 def _adicionais_do_item(item):
     """Retorna lista normalizada de adicionais.
-    Aceita 'adicionais' (novo servidor) ou 'addons' (legado).
-    Precos aceitos, em ordem: preco_cents -> priceCents (camelCase) -> price_cents (snake_case).
-    Cada adicional retornado tem chaves 'nome' e 'preco_cents'.
+    Le em ordem de fallback (a primeira lista NAO-VAZIA vence):
+      adicionais -> addons -> addons_json -> selections_json -> customizations_json
+    Aliases de NOME aceitos: nome, name, addon_name, option_name, label, title
+    Aliases de PRECO aceitos: preco_cents, priceCents, price_cents, unit_price_cents
     Retorna [] em qualquer situacao inesperada — nunca lanca excecao.
     """
     if not isinstance(item, dict): return []
+
+    def _nome_adicional(a):
+        if not isinstance(a, dict): return ""
+        for k in ("nome", "name", "addon_name", "option_name", "label", "title"):
+            v = a.get(k)
+            if v: return str(v)
+        return ""
+
     def _preco_adicional(a):
         if not isinstance(a, dict): return 0
-        for k in ("preco_cents", "priceCents", "price_cents"):
+        for k in ("preco_cents", "priceCents", "price_cents", "unit_price_cents"):
             v = a.get(k)
             if v:
                 try: return int(v)
                 except (TypeError, ValueError): return 0
         return 0
 
-    ads = item.get("adicionais")
-    if isinstance(ads, list) and ads:
-        return [{"nome": (a.get("nome") or a.get("name","")) if isinstance(a, dict) else "",
-                 "preco_cents": _preco_adicional(a)}
-                for a in ads if a and isinstance(a, dict)]
-    ads = item.get("addons")
-    if isinstance(ads, list) and ads:
-        return [{"nome": (a.get("name") or a.get("nome","")) if isinstance(a, dict) else "",
-                 "preco_cents": _preco_adicional(a)}
-                for a in ads if a and isinstance(a, dict)]
+    # Ordem de fallback: primeira chave com lista NAO-VAZIA de dicts vence.
+    for chave in ("adicionais", "addons", "addons_json", "selections_json", "customizations_json"):
+        ads = item.get(chave)
+        if not isinstance(ads, list) or not ads:
+            continue
+        # Filtra apenas dicts com pelo menos algum nome legivel
+        norm = [{"nome": _nome_adicional(a), "preco_cents": _preco_adicional(a)}
+                for a in ads if isinstance(a, dict)]
+        norm = [a for a in norm if a["nome"]]  # descarta linhas sem nome
+        if norm:
+            return norm
     return []
 
 def _obs_do_item(item):
@@ -1288,7 +1298,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.62"
+CURRENT_VERSION = "5.63"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
