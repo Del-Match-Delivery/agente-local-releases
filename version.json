@@ -1,5 +1,5 @@
 {
-  "version": "5.64",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.64/AgenteLocal.exe",
-  "notes": "v5.64: Adicionais/escolhas/customizacoes agora sao unificados (uniao das 5 chaves com dedup por nome+preco) — combos e wizards mostram TUDO no cupom, nao so a primeira lista nao-vazia."
+  "version": "5.65",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.65/AgenteLocal.exe",
+  "notes": "v5.65: Dedup de adicionais agora prioriza o addonId (addonId/addon_id/id) quando existe, caindo para (nome+preco) so sem id. Escolhas de grupos diferentes com o mesmo texto (ex: combos Subway com dois 'Nao quero Acompanhamento') nao colapsam mais — as duas saem no cupom (caixa e cozinha). Alinhado com o servidor (print-agent-poll)."
 }

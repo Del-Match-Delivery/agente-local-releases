@@ -614,12 +614,25 @@ def _itens_do_content(content):
 
 def _adicionais_do_item(item):
     """Retorna lista normalizada de adicionais/escolhas/customizacoes do item.
-    UNIAO das 5 chaves (com dedup por nome+preco), na ordem:
+    UNIAO das 5 chaves, na ordem:
       adicionais -> addons -> addons_json -> selections_json -> customizations_json
     Isso cobre combos/wizard onde o item traz adicionais em addons_json E escolhas em
     selections_json ao mesmo tempo — antes o fallback perdia uma das listas.
+
     Aliases de NOME aceitos: nome, name, addon_name, option_name, label, title
     Aliases de PRECO aceitos: preco_cents, priceCents, price_cents, unit_price_cents
+    Aliases de ID   aceitos: addonId, addon_id, id
+
+    DEDUP (contrato do servidor, confirmado 2026-07-12):
+      - Se o adicional tem ID (addonId/addon_id/id): dedup por ESSE ID. Assim a MESMA
+        escolha que chega em 2 chaves (ex: addons E addons_json) colapsa em 1 (mesmo id),
+        MAS escolhas de GRUPOS DIFERENTES com o mesmo texto (ex: dois "Nao quero
+        Acompanhamento" num combo Subway, cada um com addonId proprio) NAO colapsam —
+        as duas saem no cupom. Antes o dedup era por (nome+preco) e perdia uma delas.
+      - Se o adicional NAO tem ID: cai para dedup por (nome_lower, preco) — comportamento
+        historico, evita duplicar o mesmo adicional vindo em varias chaves.
+    Nota: adicional NUNCA tem quantidade propria (0 ocorrencias em 60 dias no banco);
+    a quantidade relevante e a do ITEM (_qtd_do_item). Cada escolha e uma entrada.
     Retorna [] em qualquer situacao inesperada — nunca lanca excecao.
     """
     if not isinstance(item, dict): return []
@@ -640,8 +653,15 @@ def _adicionais_do_item(item):
                 except (TypeError, ValueError): return 0
         return 0
 
+    def _id_adicional(a):
+        if not isinstance(a, dict): return ""
+        for k in ("addonId", "addon_id", "id"):
+            v = a.get(k)
+            if v not in (None, "", 0): return str(v).strip()
+        return ""
+
     resultado = []
-    vistos = set()  # dedup por (nome_lower, preco) — mesmo adicional em varias chaves so sai 1x
+    vistos = set()  # dedup: por id quando existe; senao por (nome_lower, preco)
     for chave in ("adicionais", "addons", "addons_json", "selections_json", "customizations_json"):
         ads = item.get(chave)
         if not isinstance(ads, list) or not ads:
@@ -651,7 +671,10 @@ def _adicionais_do_item(item):
             nome = _nome_adicional(a)
             if not nome: continue
             preco = _preco_adicional(a)
-            chave_dedup = (nome.strip().lower(), preco)
+            aid = _id_adicional(a)
+            # Prioriza o ID (distingue escolhas de grupos distintos com texto igual);
+            # sem ID, mantem o dedup historico por (nome+preco).
+            chave_dedup = ("id", aid) if aid else (nome.strip().lower(), preco)
             if chave_dedup in vistos: continue
             vistos.add(chave_dedup)
             resultado.append({"nome": nome, "preco_cents": preco})
@@ -1304,7 +1327,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.64"
+CURRENT_VERSION = "5.65"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
