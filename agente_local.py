@@ -28,8 +28,77 @@ BASE_DIR     = Path(sys.executable).parent if getattr(sys, 'frozen', False) else
 # Garante que o log sempre fica na pasta do exe, nao na pasta de trabalho
 if getattr(sys, 'frozen', False):
     BASE_DIR = Path(sys.executable).parent
-CONFIG_PATH  = BASE_DIR / "config.json"
-LOG_PATH     = BASE_DIR / "agente.log"
+
+# ---------------------------------------------------------------------------
+# DATA_DIR: pasta UNICA e ESTAVEL para config/log/estado (independente de onde
+# o .exe roda). ANTES o config.json ficava colado ao .exe (BASE_DIR); com varias
+# copias do agente em pastas diferentes, cada uma tinha SEU config, e apos um
+# update o agente relancava "a copia que sobrou" — o lojista abria e a config
+# aparecia trocada/antiga. Fixando o config em %LOCALAPPDATA%\AgenteLocalMIA,
+# QUALQUER .exe (de qualquer pasta) le/grava SEMPRE a mesma config. O .exe/.bat
+# de update continuam em BASE_DIR (sao artefatos de instalacao, nao dados).
+def _resolver_data_dir():
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
+    d = Path(base) / "AgenteLocalMIA"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # Fallback extremo: se nao der pra criar em LOCALAPPDATA, usa a pasta do exe
+        return BASE_DIR
+    return d
+
+DATA_DIR     = _resolver_data_dir()
+CONFIG_PATH  = DATA_DIR / "config.json"
+LOG_PATH     = DATA_DIR / "agente.log"
+
+def _migrar_config_para_data_dir():
+    """Na 1a execucao com config em DATA_DIR: se ainda nao existe config la, procura
+    o config.json existente mais RECENTE nos locais historicos (pasta do exe atual +
+    pastas conhecidas de copias antigas) e copia para DATA_DIR. Assim o lojista NUNCA
+    perde a config ao migrar de versao. Nao apaga o original (seguranca)."""
+    if CONFIG_PATH.exists():
+        return  # ja migrado / ja existe config no local definitivo
+    candidatos = []
+    # 1) config ao lado do exe atual (o caso mais comum)
+    candidatos.append(BASE_DIR / "config.json")
+    # 2) pastas historicas onde o agente pode ter rodado antes
+    try:
+        _home = Path.home()
+        for p in (
+            _home / "Desktop" / "Agente Local" / "config.json",
+            _home / "Desktop" / "Agente Local" / "dist" / "config.json",
+            _home / "Desktop" / "Agente Local" / "agente-local-releases" / "config.json",
+            _home / "OneDrive" / "Desktop" / "Agente Local" / "config.json",
+        ):
+            candidatos.append(p)
+    except Exception:
+        pass
+    # Escolhe o config VALIDO (com token/restaurant_id) mais recente
+    melhor = None
+    melhor_mtime = -1
+    for c in candidatos:
+        try:
+            if not c.exists():
+                continue
+            dados = json.loads(c.read_text(encoding="utf-8"))
+            if not isinstance(dados, dict):
+                continue
+            # so considera config "de verdade" (nao um esqueleto vazio)
+            if not (dados.get("token") or dados.get("restaurant_id")):
+                continue
+            mt = c.stat().st_mtime
+            if mt > melhor_mtime:
+                melhor_mtime = mt
+                melhor = c
+        except Exception:
+            continue
+    if melhor is not None:
+        try:
+            CONFIG_PATH.write_text(melhor.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception:
+            pass
+
+_migrar_config_para_data_dir()
 SUPABASE_URL  = "https://szlyzyflalerxuyxfxzh.supabase.co"
 SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN6bHl6eWZsYWxlcnh1eXhmeHpoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQwMDkyNTQsImV4cCI6MjA4OTU4NTI1NH0.2UewBvzucel7wiuXv14mvgDmi_FmzCc-Zh2CISL9_VI"
 DEVICE_NAME        = socket.gethostname()
@@ -1327,7 +1396,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.65"
+CURRENT_VERSION = "5.66"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -3104,6 +3173,41 @@ if __name__ == "__main__":
                         break
                     except Exception:
                         time.sleep(3)
+            # "Sumir com os dados antigos": apos a config definitiva em DATA_DIR existir e
+            # ser valida, apaga config.json ORFAOS deixados em pastas antigas — eram eles que,
+            # apos um update, faziam o agente reabrir com a config trocada. So remove se o
+            # config bom ja esta salvo no local definitivo (nunca apaga o unico config valido).
+            try:
+                if CONFIG_PATH.exists():
+                    _def = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+                    _def_ok = isinstance(_def, dict) and (_def.get("token") or _def.get("restaurant_id"))
+                    if _def_ok:
+                        _home = Path.home()
+                        _orfaos = [
+                            BASE_DIR / "config.json",  # config colado ao exe (legado)
+                            _home / "Desktop" / "Agente Local" / "config.json",
+                            _home / "Desktop" / "Agente Local" / "dist" / "config.json",
+                            _home / "Desktop" / "Agente Local" / "agente-local-releases" / "config.json",
+                            _home / "OneDrive" / "Desktop" / "Agente Local" / "config.json",
+                        ]
+                        for c in _orfaos:
+                            try:
+                                # nunca apaga o proprio arquivo definitivo
+                                if c.resolve() == CONFIG_PATH.resolve():
+                                    continue
+                                if c.exists():
+                                    # backup leve antes de remover (por seguranca), depois apaga
+                                    try:
+                                        (c.parent / "config.orfao.bak").write_text(
+                                            c.read_text(encoding="utf-8"), encoding="utf-8")
+                                    except Exception:
+                                        pass
+                                    c.unlink()
+                                    log.info(f"[CLEANUP] Removido config orfao: {c}")
+                            except Exception:
+                                continue
+            except Exception as e:
+                log.debug(f"[CLEANUP] Erro ao limpar configs orfaos: {e}")
         threading.Thread(target=_cleanup_old_exes, daemon=True).start()
 
     # Garante startup no Windows

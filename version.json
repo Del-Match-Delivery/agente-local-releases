@@ -1,5 +1,5 @@
 {
-  "version": "5.65",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.65/AgenteLocal.exe",
-  "notes": "v5.65: Dedup de adicionais agora prioriza o addonId (addonId/addon_id/id) quando existe, caindo para (nome+preco) so sem id. Escolhas de grupos diferentes com o mesmo texto (ex: combos Subway com dois 'Nao quero Acompanhamento') nao colapsam mais — as duas saem no cupom (caixa e cozinha). Alinhado com o servidor (print-agent-poll)."
+  "version": "5.66",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.66/AgenteLocal.exe",
+  "notes": "v5.66: Config agora fica em pasta unica e estavel (%LOCALAPPDATA%/AgenteLocalMIA/config.json), independente de onde o .exe roda. Migracao automatica no 1o boot pos-update: puxa a config atual do cliente e leva pra pasta definitiva — o cliente NAO perde impressoras/token apos atualizar. Limpa configs orfaos de pastas antigas que faziam a config aparecer trocada. Inclui o dedup de adicionais por addonId (v5.65)."
 }
