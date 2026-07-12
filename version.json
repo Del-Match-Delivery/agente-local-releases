@@ -1,5 +1,5 @@
 {
-  "version": "5.63",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.63/AgenteLocal.exe",
-  "notes": "v5.63: Adicionais impressos mesmo quando servidor manda em addons_json/selections_json/customizations_json (fallback entre 5 chaves) + aceita aliases de nome (name/addon_name/option_name/label/title) e preco (unit_price_cents)."
+  "version": "5.64",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.64/AgenteLocal.exe",
+  "notes": "v5.64: Adicionais/escolhas/customizacoes agora sao unificados (uniao das 5 chaves com dedup por nome+preco) — combos e wizards mostram TUDO no cupom, nao so a primeira lista nao-vazia."
 }

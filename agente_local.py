@@ -613,9 +613,11 @@ def _itens_do_content(content):
     return itens if isinstance(itens, list) else []
 
 def _adicionais_do_item(item):
-    """Retorna lista normalizada de adicionais.
-    Le em ordem de fallback (a primeira lista NAO-VAZIA vence):
+    """Retorna lista normalizada de adicionais/escolhas/customizacoes do item.
+    UNIAO das 5 chaves (com dedup por nome+preco), na ordem:
       adicionais -> addons -> addons_json -> selections_json -> customizations_json
+    Isso cobre combos/wizard onde o item traz adicionais em addons_json E escolhas em
+    selections_json ao mesmo tempo — antes o fallback perdia uma das listas.
     Aliases de NOME aceitos: nome, name, addon_name, option_name, label, title
     Aliases de PRECO aceitos: preco_cents, priceCents, price_cents, unit_price_cents
     Retorna [] em qualquer situacao inesperada — nunca lanca excecao.
@@ -638,18 +640,22 @@ def _adicionais_do_item(item):
                 except (TypeError, ValueError): return 0
         return 0
 
-    # Ordem de fallback: primeira chave com lista NAO-VAZIA de dicts vence.
+    resultado = []
+    vistos = set()  # dedup por (nome_lower, preco) — mesmo adicional em varias chaves so sai 1x
     for chave in ("adicionais", "addons", "addons_json", "selections_json", "customizations_json"):
         ads = item.get(chave)
         if not isinstance(ads, list) or not ads:
             continue
-        # Filtra apenas dicts com pelo menos algum nome legivel
-        norm = [{"nome": _nome_adicional(a), "preco_cents": _preco_adicional(a)}
-                for a in ads if isinstance(a, dict)]
-        norm = [a for a in norm if a["nome"]]  # descarta linhas sem nome
-        if norm:
-            return norm
-    return []
+        for a in ads:
+            if not isinstance(a, dict): continue
+            nome = _nome_adicional(a)
+            if not nome: continue
+            preco = _preco_adicional(a)
+            chave_dedup = (nome.strip().lower(), preco)
+            if chave_dedup in vistos: continue
+            vistos.add(chave_dedup)
+            resultado.append({"nome": nome, "preco_cents": preco})
+    return resultado
 
 def _obs_do_item(item):
     """Retorna observacao do item. Aceita 'obs' (novo servidor) ou 'notes' (legado)."""
@@ -1298,7 +1304,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.63"
+CURRENT_VERSION = "5.64"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
