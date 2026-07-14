@@ -275,6 +275,43 @@ def _garantir_startup():
     except Exception as e:
         log.error(f"[STARTUP] Erro: {e}")
 
+def _auto_reparo_boot():
+    """Auto-reparo executado no boot. Corrige os estados que faziam 'clico e nao abre':
+      1. Se estou rodando como AgenteLocal_X.exe (nome versionado, resquicio de update que
+         nao renomeou), me copio como AgenteLocal.exe — o nome FIXO que o atalho/registro
+         esperam. Assim o proximo clique/boot encontra o arquivo certo.
+      2. Remove exes versionados orfaos na pasta (limpeza).
+    Nunca lanca excecao (best-effort). So roda em modo frozen (exe real)."""
+    if not getattr(sys, 'frozen', False):
+        return
+    try:
+        eu = Path(sys.executable)
+        alvo = eu.parent / "AgenteLocal.exe"
+        # 1) Se meu nome nao e o fixo, garante que existe um AgenteLocal.exe atualizado
+        if eu.name.lower() != "agentelocal.exe":
+            try:
+                precisa = (not alvo.exists()) or (alvo.stat().st_size != eu.stat().st_size)
+                if precisa:
+                    import shutil
+                    shutil.copy2(str(eu), str(alvo))
+                    log.info(f"[REPARO] Normalizei o nome do exe: {eu.name} -> AgenteLocal.exe")
+            except Exception as e:
+                log.warning(f"[REPARO] Nao consegui normalizar nome do exe: {e}")
+        # 2) Remove versionados orfaos (mantem o AgenteLocal.exe e a mim mesmo)
+        try:
+            for f in eu.parent.glob("AgenteLocal_*.exe"):
+                if f.resolve() == eu.resolve():
+                    continue  # nao apago a mim mesmo enquanto rodo
+                try:
+                    f.unlink()
+                    log.info(f"[REPARO] Removido exe versionado orfao: {f.name}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception as e:
+        log.debug(f"[REPARO] Erro no auto-reparo: {e}")
+
 def iniciar_tray():
     global _tray_icon
     if not HAS_TRAY: return
@@ -1396,80 +1433,149 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.66"
+CURRENT_VERSION = "5.67"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
 
 def _bat_update(exe_novo: Path, exe_destino: Path, del_extra: str = "") -> str:
-    """Gera conteudo do bat de update. Mata processos, move com retry, lanca nova versao."""
-    exe_destino_nome = exe_destino.name
-    lock = exe_novo.parent / "update_lock.tmp"
+    """Gera o bat de update BLINDADO. Garantias:
+      - NUNCA deixa a loja sem AgenteLocal.exe: faz BACKUP do atual e usa COPY (nao move
+        destrutivo). Se a copia falhar, restaura o backup e abre a versao antiga.
+      - Mata processos por CURINGA (AgenteLocal*), pegando nomes versionados travados.
+      - Sempre relanca com o nome FIXO AgenteLocal.exe (nunca versionado).
+      - ROLLBACK automatico: apos abrir o novo, espera um HEARTBEAT (.boot_ok). Se o novo
+        exe nao subir em ~30s, restaura o backup e abre a versao anterior — a loja volta
+        a funcionar na versao que funcionava, em vez de ficar travada.
+    """
+    lock      = exe_novo.parent / "update_lock.tmp"
+    backup    = exe_novo.parent / "AgenteLocal.bak.exe"
+    heartbeat = exe_novo.parent / ".boot_ok"
+    d = str(exe_destino)
     return (
         "@echo off\r\n"
-        # Sai imediatamente se outro bat de update ja esta rodando
         f'if exist "{lock}" exit /b 0\r\n'
         f'echo 1>"{lock}"\r\n'
-        # Mata todos os processos AgenteLocal pelo nome exato e versoes antigas via WMIC
-        f'taskkill /F /IM "{exe_destino_nome}" >nul 2>&1\r\n'
-        "for /f \"skip=1 tokens=2 delims=,\" %%P in ('wmic process where \"name like 'AgenteLocal%%'\" get processid /format:csv 2^>nul') do taskkill /F /PID %%P >nul 2>&1\r\n"
-        # Espera processo liberar o arquivo
+        # 1) Mata TODAS as instancias AgenteLocal* (inclui nomes versionados travados)
+        '  taskkill /F /FI "IMAGENAME eq AgenteLocal*" /T >nul 2>&1\r\n'
         "timeout /t 5 /nobreak >nul\r\n"
-        # Move com retry (max 10 tentativas = 30s)
+        # 2) Backup do exe atual (se existir) — rede de seguranca para rollback
+        f'if exist "{d}" copy /y "{d}" "{backup}" >nul 2>&1\r\n'
+        # 3) Limpa heartbeat antigo e aplica o novo por COPY com retry (max 10 = ~30s)
+        f'del /f /q "{heartbeat}" >nul 2>&1\r\n'
         "set /a TRIES=0\r\n"
         ":retry\r\n"
-        f'move /y "{exe_novo}" "{exe_destino}" >nul 2>&1\r\n'
+        f'copy /y "{exe_novo}" "{d}" >nul 2>&1\r\n'
         "if errorlevel 1 (\r\n"
         "  set /a TRIES+=1\r\n"
-        "  if %TRIES% GEQ 10 goto :fail\r\n"
+        "  if %TRIES% GEQ 10 goto :rollback\r\n"
         "  timeout /t 3 /nobreak >nul\r\n"
         "  goto retry\r\n"
         ")\r\n"
         + del_extra +
-        # Lanca nova versao
-        f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe_destino}\'"\r\n'
+        # 4) Abre a versao nova (nome fixo) e espera o heartbeat de boot
+        f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{d}\'"\r\n'
+        "set /a WAIT=0\r\n"
+        ":waitboot\r\n"
+        "timeout /t 3 /nobreak >nul\r\n"
+        f'if exist "{heartbeat}" goto :ok\r\n'
+        "set /a WAIT+=1\r\n"
+        "if %WAIT% GEQ 10 goto :rollback\r\n"
+        "goto waitboot\r\n"
+        # 5) OK: novo exe subiu. Remove o exe versionado baixado e o backup.
+        ":ok\r\n"
+        f'if /I not "{str(exe_novo)}"=="{d}" del /f /q "{exe_novo}" >nul 2>&1\r\n'
+        f'del /f /q "{backup}" >nul 2>&1\r\n'
         "goto :end\r\n"
-        ":fail\r\n"
-        # Move falhou: relanca o exe destino atual sem update
-        f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe_destino}\'"\r\n'
+        # 6) ROLLBACK: novo nao subiu / copia falhou. Restaura backup e abre a versao antiga.
+        ":rollback\r\n"
+        f'taskkill /F /FI "IMAGENAME eq AgenteLocal*" /T >nul 2>&1\r\n'
+        "timeout /t 3 /nobreak >nul\r\n"
+        f'if exist "{backup}" copy /y "{backup}" "{d}" >nul 2>&1\r\n'
+        f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{d}\'"\r\n'
         ":end\r\n"
         f'del /f /q "{lock}" >nul 2>&1\r\n'
         'del "%~f0"\r\n'
     )
 
+_TAMANHO_MIN_EXE = 3 * 1024 * 1024  # 3 MB: piso de sanidade (o exe real tem ~20 MB;
+                                    # um HTML de erro/404 ou download truncado e pequeno)
+
 def _baixar_e_aplicar_update(nova, url_nova):
-    """Roda em thread separada: baixa o exe novo e aplica sem travar o poll."""
+    """Roda em thread separada: baixa o exe novo, VERIFICA INTEGRIDADE e aplica via bat
+    blindado (backup + copy + heartbeat + rollback). Se o download vier corrompido/curto,
+    ABORTA sem aplicar — nunca substitui o exe bom por um quebrado (que causaria 'nao abre').
+    Em qualquer falha, libera o lock para tentar de novo no proximo ciclo (nao trava)."""
     global _update_em_andamento
     try:
-        # Baixa como .tmp para evitar que o cleanup de versoes antigas apague antes do bat mover
-        exe_tmp = BASE_DIR / f"AgenteLocal_update.tmp"
+        exe_tmp = BASE_DIR / "AgenteLocal_update.tmp"
         exe_novo = BASE_DIR / f"AgenteLocal_{nova}.exe"
         log.info(f"[UPDATE] Baixando v{nova}...")
         req = urllib.request.Request(url_nova)
+        esperado = None
+        baixado = 0
         with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as r, open(exe_tmp, "wb") as f:
+            try:
+                esperado = int(r.headers.get("Content-Length") or 0) or None
+            except Exception:
+                esperado = None
             while True:
                 chunk = r.read(65536)
                 if not chunk:
                     break
                 f.write(chunk)
-        # Renomeia para .exe so apos download completo
+                baixado += len(chunk)
+
+        # --- INTEGRIDADE (blindagem 6) ---
+        # (a) tamanho minimo plausivel
+        if baixado < _TAMANHO_MIN_EXE:
+            raise ValueError(f"download muito pequeno ({baixado} bytes) — provavel erro/404, abortando")
+        # (b) bate com Content-Length quando o servidor informa
+        if esperado and baixado != esperado:
+            raise ValueError(f"download incompleto ({baixado}/{esperado} bytes), abortando")
+        # (c) assinatura de executavel Windows (PE começa com 'MZ')
+        try:
+            with open(exe_tmp, "rb") as _fp:
+                if _fp.read(2) != b"MZ":
+                    raise ValueError("arquivo baixado nao e um .exe valido (sem cabecalho MZ), abortando")
+        except ValueError:
+            raise
+        except Exception:
+            pass  # se nao conseguir ler o cabecalho, os checks (a)/(b) ja protegem
+
+        # Renomeia para .exe so APOS validar
         if exe_novo.exists():
-            exe_novo.unlink()
+            try: exe_novo.unlink()
+            except Exception: pass
         exe_tmp.rename(exe_novo)
-        log.info(f"[UPDATE] Download concluido: {exe_novo}")
+        log.info(f"[UPDATE] Download OK e validado ({baixado} bytes): {exe_novo}")
+
         exe_destino = BASE_DIR / "AgenteLocal.exe"
-        exe_atual = Path(sys.executable)
-        del_extra = f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else ""
+        # del_extra removido: o bat blindado ja limpa versionados no :ok de forma segura.
+        # Apagar o exe atual em execucao aqui era arriscado (podia deixar a loja sem exe).
         bat = BASE_DIR / "update_apply.bat"
-        bat.write_text(_bat_update(exe_novo, exe_destino, del_extra), encoding="utf-8")
+        bat.write_text(_bat_update(exe_novo, exe_destino, ""), encoding="utf-8")
         subprocess.Popen(
             ["cmd", "/c", str(bat)],
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
         )
-        log.info("[UPDATE] Reiniciando para aplicar atualizacao...")
+        log.info("[UPDATE] Aplicando atualizacao (bat blindado com rollback)...")
         sys.exit(0)
+    except SystemExit:
+        raise
     except Exception as e:
-        log.warning(f"[UPDATE] Falha no download: {e}")
+        log.warning(f"[UPDATE] Falha/abortado no update: {e}")
+        # Limpa o tmp corrompido e libera o lock para retry no proximo ciclo (blindagem 5)
+        try:
+            _t = BASE_DIR / "AgenteLocal_update.tmp"
+            if _t.exists(): _t.unlink()
+        except Exception:
+            pass
+        try:
+            _lock = BASE_DIR / ".update_attempt.lock"
+            if _lock.exists(): _lock.unlink()
+        except Exception:
+            pass
         _update_em_andamento = False
 
 async def checar_atualizacao():
@@ -1783,6 +1889,15 @@ def abrir_dashboard():
     tk.Button(bf, text="Ver Log", command=abrir_log,
               bg="#313244", fg="#cdd6f4", font=("Segoe UI",9,"bold"),
               relief="flat", padx=12, pady=5, cursor="hand2").pack(side="left", padx=4)
+    def _reparar_confirm():
+        if messagebox.askyesno("Reparar",
+                "Reparar o agente agora?\n\nIsso fecha e reabre o agente, corrigindo problemas "
+                "de inicializacao (ex: 'nao abre' apos atualizar). Suas configuracoes sao mantidas.",
+                parent=w):
+            reparar_agente()
+    tk.Button(bf, text="Reparar", command=_reparar_confirm,
+              bg="#f9e2af", fg="#1e1e2e", font=("Segoe UI",9,"bold"),
+              relief="flat", padx=12, pady=5, cursor="hand2").pack(side="left", padx=4)
     btn_upd = tk.Button(bf, text="Atualizar Sistema",
                         bg="#a6e3a1", fg="#1e1e2e", font=("Segoe UI",9,"bold"),
                         relief="flat", padx=12, pady=5, cursor="hand2")
@@ -1811,18 +1926,42 @@ def abrir_dashboard():
                     btn_upd.config(text="Baixando...", bg="#f9e2af")
                     def _baixar():
                         try:
+                            exe_tmp = BASE_DIR / "AgenteLocal_update.tmp"
                             exe_novo = BASE_DIR / f"AgenteLocal_{nova}.exe"
-                            urllib.request.urlretrieve(url_nova, exe_novo)
+                            # Baixa validando integridade (mesma blindagem do update automatico)
+                            req2 = urllib.request.Request(url_nova)
+                            baixado = 0; esperado = None
+                            with urllib.request.urlopen(req2, timeout=120, context=_ssl_ctx()) as rr, open(exe_tmp,"wb") as ff:
+                                try: esperado = int(rr.headers.get("Content-Length") or 0) or None
+                                except Exception: esperado = None
+                                while True:
+                                    ch = rr.read(65536)
+                                    if not ch: break
+                                    ff.write(ch); baixado += len(ch)
+                            if baixado < _TAMANHO_MIN_EXE:
+                                raise ValueError(f"download muito pequeno ({baixado} bytes) — abortado")
+                            if esperado and baixado != esperado:
+                                raise ValueError(f"download incompleto ({baixado}/{esperado})")
+                            with open(exe_tmp,"rb") as _fp:
+                                if _fp.read(2) != b"MZ":
+                                    raise ValueError("arquivo baixado nao e um .exe valido")
+                            if exe_novo.exists():
+                                try: exe_novo.unlink()
+                                except Exception: pass
+                            exe_tmp.rename(exe_novo)
                             exe_destino = BASE_DIR / "AgenteLocal.exe"
-                            exe_atual = Path(sys.executable)
-                            del_extra2 = f'del /f /q "{exe_atual}" >nul 2>&1\r\n' if exe_atual.name.lower() != "agentelocal.exe" else ""
+                            # del_extra removido: o bat blindado ja limpa versionados com seguranca.
                             bat = BASE_DIR / "update_apply.bat"
-                            bat.write_text(_bat_update(exe_novo, exe_destino, del_extra2), encoding="utf-8")
+                            bat.write_text(_bat_update(exe_novo, exe_destino, ""), encoding="utf-8")
                             subprocess.Popen(["cmd","/c",str(bat)], creationflags=subprocess.CREATE_NO_WINDOW)
-                            log.info(f"[UPDATE] Atualizando para v{nova} via botao manual")
+                            log.info(f"[UPDATE] Atualizando para v{nova} via botao manual (validado {baixado} bytes)")
                             w.after(0, lambda: messagebox.showinfo("Atualizando",f"Atualizando para v{nova}...\nO agente vai reiniciar automaticamente.",parent=w))
                             w.after(500, sys.exit)
                         except Exception as e:
+                            try:
+                                _t = BASE_DIR / "AgenteLocal_update.tmp"
+                                if _t.exists(): _t.unlink()
+                            except Exception: pass
                             w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
                                                 messagebox.showerror("Erro",f"Falha ao baixar:\n{e}",parent=w)))
                     threading.Thread(target=_baixar, daemon=True).start()
@@ -2968,6 +3107,32 @@ def reiniciar_app():
     os._exit(0)
 
 
+def reparar_agente():
+    """Botao 'Reparar' da GUI. Faz o mesmo que o CORRIGIR_AGENTE.bat, de dentro do app:
+    normaliza o nome do exe, limpa versionados orfaos, mata TODAS as instancias travadas
+    (por curinga) e reabre uma unica pelo nome fixo. Resolve 'clico e nao abre' sem CMD."""
+    log.info("[REPARO] Reparo manual solicitado pela GUI")
+    try:
+        _auto_reparo_boot()  # normaliza nome + remove versionados orfaos
+    except Exception as e:
+        log.warning(f"[REPARO] auto_reparo falhou: {e}")
+    if getattr(sys, 'frozen', False):
+        exe = str(BASE_DIR / "AgenteLocal.exe")
+    else:
+        exe = sys.executable
+    bat = BASE_DIR / "reparo.bat"
+    # Mata tudo por curinga (pega versionados travados), espera e reabre pelo nome fixo.
+    bat.write_text(
+        "@echo off\r\n"
+        'taskkill /F /FI "IMAGENAME eq AgenteLocal*" /T >nul 2>&1\r\n'
+        "timeout /t 3 /nobreak >nul\r\n"
+        f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe}\'"\r\n'
+        'del "%~f0"\r\n',
+        encoding="utf-8"
+    )
+    subprocess.Popen(["cmd", "/c", str(bat)],
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+    os._exit(0)
 
 
 def verificar_atualizacao():
@@ -3109,44 +3274,81 @@ def _check():
         pass
     _root.after(300, _check)
 
+def _matar_outras_instancias():
+    """Mata TODAS as outras instancias AgenteLocal* (inclui nomes versionados travados,
+    ex: AgenteLocal_5.54.exe), EXCETO o processo atual. Usa taskkill por CURINGA no filtro
+    /FI (WMIC foi descontinuado e retorna 'Consulta invalida' no Windows novo do cliente).
+    Retorna quantos matou (aproximado)."""
+    meu_pid = os.getpid()
+    mortos = 0
+    try:
+        # Lista PIDs de processos AgenteLocal* via tasklist CSV (robusto, sem WMIC)
+        r = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq AgenteLocal*", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=6
+        )
+        for linha in (r.stdout or "").splitlines():
+            partes = [p.strip().strip('"') for p in linha.split('","')]
+            partes = [p.strip('"') for p in partes]
+            if len(partes) >= 2:
+                try:
+                    pid_outro = int(partes[1])
+                except ValueError:
+                    continue
+                if pid_outro != meu_pid and pid_outro > 0:
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid_outro), "/T"],
+                                   capture_output=True, timeout=5)
+                    mortos += 1
+                    log.info(f"[STARTUP] Matou instancia paralela PID={pid_outro} ({partes[0]})")
+    except Exception as e:
+        log.debug(f"[STARTUP] Erro ao listar/matar instancias: {e}")
+    return mortos
+
+
+def _escrever_heartbeat():
+    """Escreve o arquivo .boot_ok que o bat de update usa para confirmar que o exe novo
+    subiu (senao faz rollback). Escrito cedo no boot, antes de qualquer coisa que possa
+    demorar/falhar (GUI, sync)."""
+    try:
+        (BASE_DIR / ".boot_ok").write_text(str(CURRENT_VERSION), encoding="utf-8")
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     if getattr(sys, 'frozen', False):
         import ctypes
 
-        meu_pid = os.getpid()
-        meu_exe_nome = Path(sys.executable).name.lower()
-
-        # Mata TODAS as outras instancias AgenteLocal* (versionadas ou nao) antes de iniciar.
-        # Isso resolve o problema de updates parciais que deixam multiplas instancias rodando.
-        # Mantem apenas o processo atual.
-        try:
-            r = subprocess.run(
-                ["wmic", "process", "where", "name like 'AgenteLocal%'",
-                 "get", "ProcessId,Name", r"\format:csv"],
-                capture_output=True, text=True, timeout=5
-            )
-            for linha in r.stdout.splitlines():
-                partes = [p.strip() for p in linha.split(",")]
-                if len(partes) >= 3:
-                    try:
-                        pid_outro = int(partes[-1])
-                        if pid_outro != meu_pid and pid_outro > 0:
-                            subprocess.run(["taskkill", "/F", "/PID", str(pid_outro)],
-                                           capture_output=True, timeout=4)
-                            log.info(f"[STARTUP] Matou instancia paralela PID={pid_outro}")
-                    except ValueError:
-                        continue
-        except Exception as e:
-            log.debug(f"[STARTUP] Erro ao limpar instancias: {e}")
-
+        # 1) Limpa instancias travadas (por curinga, pega versionados)
+        _matar_outras_instancias()
         time.sleep(2)  # aguarda processos morrerem antes de continuar
 
-        # Mutex global — segunda camada de protecao
-        _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, True, "AgenteLocalMIA_SingleInstance")
-        _mutex_err = ctypes.windll.kernel32.GetLastError()
-        if _mutex_err == 183:  # ERROR_ALREADY_EXISTS
-            log.warning("[STARTUP] Outra instancia ainda detem o mutex apos limpeza. Encerrando.")
-            sys.exit(0)
+        # 2) Mutex global — instancia unica, MAS sem travar a reabertura.
+        # Se o mutex ja existe, e porque uma instancia fantasma sobreviveu a limpeza.
+        # Em vez de encerrar em silencio (bug que fazia "clico e nao abre"), tentamos
+        # matar de novo e re-adquirir. So se REALMENTE nao conseguir apos 3 tentativas
+        # e continuar sinalizado, aceitamos e seguimos assim mesmo (melhor 2 rodando por
+        # instantes do que a loja sem agente). NUNCA sys.exit por causa disso.
+        _mutex_handle = None
+        for _tent in range(3):
+            _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, True, "AgenteLocalMIA_SingleInstance")
+            if ctypes.windll.kernel32.GetLastError() != 183:  # 183 = ERROR_ALREADY_EXISTS
+                break
+            log.warning(f"[STARTUP] Mutex ocupado (tentativa {_tent+1}/3) — matando fantasma e tentando de novo")
+            try:
+                ctypes.windll.kernel32.CloseHandle(_mutex_handle)
+            except Exception:
+                pass
+            _matar_outras_instancias()
+            time.sleep(2)
+        else:
+            log.warning("[STARTUP] Mutex seguiu ocupado apos 3 tentativas — seguindo mesmo assim (nao encerra)")
+
+        # 3) Heartbeat: sinaliza que este exe subiu (o bat de update aguarda isso p/ rollback)
+        _escrever_heartbeat()
+
+        # 4) Auto-reparo: normaliza nome versionado -> AgenteLocal.exe e limpa orfaos
+        _auto_reparo_boot()
 
     log.info(f"=== Concentrador de Impressoes e Dispositivos v{CURRENT_VERSION} iniciando ===")
 

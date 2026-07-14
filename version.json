@@ -1,5 +1,5 @@
 {
-  "version": "5.66",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.66/AgenteLocal.exe",
-  "notes": "v5.66: Config agora fica em pasta unica e estavel (%LOCALAPPDATA%/AgenteLocalMIA/config.json), independente de onde o .exe roda. Migracao automatica no 1o boot pos-update: puxa a config atual do cliente e leva pra pasta definitiva — o cliente NAO perde impressoras/token apos atualizar. Limpa configs orfaos de pastas antigas que faziam a config aparecer trocada. Inclui o dedup de adicionais por addonId (v5.65)."
+  "version": "5.67",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.67/AgenteLocal.exe",
+  "notes": "v5.67: Blindagem contra travamento apos atualizar. O update agora faz backup do exe, aplica por copia (nao move destrutivo), verifica integridade do download (tamanho/MZ), confirma que a versao nova subiu (heartbeat) e faz ROLLBACK automatico para a versao anterior se algo falhar — a loja nunca fica sem agente. Mutex nao trava mais a reabertura (fim do 'clico e nao abre'). Limpeza/kill por curinga pega exes versionados travados. Auto-reparo no boot normaliza o nome do exe e um botao 'Reparar' na tela resolve travas sem CMD."
 }
