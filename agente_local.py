@@ -359,9 +359,12 @@ def _post(url, data, token, timeout=30, retries=2):
 
 _agents_online = []  # Atualizado a cada poll
 _token_invalido = False  # Evita abrir configuracoes multiplas vezes
+_config_auto_ja = False  # ja auto-abrimos a config nesta sessao (NUNCA reabrir sozinho depois)
+_janela_config = None    # janela de config unica (singleton: nao empilha nem rouba foco no automatico)
+_janela_dashboard = None # janela de status unica (singleton)
 
 def ef_poll_jobs():
-    global _agents_online, _token_invalido
+    global _agents_online, _token_invalido, _config_auto_ja
     imps = cfg.get("impressoras", [])
     # Declara TODAS as areas cadastradas (com ou sem nome_impressora).
     # O agente recebe todos os jobs das suas areas e processa apenas os que tem impressora mapeada.
@@ -395,9 +398,13 @@ def ef_poll_jobs():
     if s == 401:
         if not _token_invalido:
             _token_invalido = True
-            log.error(f"[POLL] Token invalido (401) - abrindo configuracoes")
-            if _root:
-                _root.after(0, abrir_config)
+            log.error(f"[POLL] Token invalido (401)")
+        # Abre a config UMA unica vez por sessao e SEM roubar foco (auto=True). NUNCA
+        # reabrir sozinho a cada oscilacao 401<->200 nem empilhar janela — era isso que
+        # ficava "abrindo na tela e nao deixava trabalhar".
+        if _root and not _config_auto_ja and not _config_aberta():
+            _config_auto_ja = True
+            _root.after(0, lambda: abrir_config(auto=True))
         # Nao loga a cada 3s para nao encher o log
     else:
         log.error(f"[POLL] {s}: {resp}")
@@ -1433,7 +1440,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.70"
+CURRENT_VERSION = "5.71"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -1793,13 +1800,27 @@ def abrir_boasvindas():
 
 
 
+def _dashboard_aberto():
+    try:
+        return _janela_dashboard is not None and _janela_dashboard.winfo_exists()
+    except Exception:
+        return False
+
 def abrir_dashboard():
+    global _janela_dashboard
+    # JANELA UNICA: se ja esta aberta, so traz pra frente em vez de empilhar outra.
+    if _dashboard_aberto():
+        try: _janela_dashboard.deiconify(); _janela_dashboard.lift(); _janela_dashboard.focus_force()
+        except Exception: pass
+        return
     w = tk.Toplevel(_root)
     w.title("Status - Concentrador")
     w.geometry("820x620")
     w.configure(bg="#1a1a2e")
     w.resizable(True, True)
     w.lift(); w.focus_force()
+    _janela_dashboard = w
+    w.bind("<Destroy>", lambda e: (globals().__setitem__('_janela_dashboard', None) if e.widget is w else None))
 
     tk.Label(w, text="Concentrador de Impressoes e Dispositivos",
              bg="#1a1a2e", fg="#cdd6f4", font=("Segoe UI",13,"bold")).pack(pady=(14,2))
@@ -2296,11 +2317,29 @@ def abrir_log():
                   relief="flat",padx=10,pady=5).pack(side="left",padx=4)
     upd()
 
-def abrir_config():
-    global cfg
+def _config_aberta():
+    try:
+        return _janela_config is not None and _janela_config.winfo_exists()
+    except Exception:
+        return False
+
+def abrir_config(auto=False):
+    global cfg, _janela_config
+    # JANELA UNICA: se ja esta aberta, nao empilha outra. No modo AUTOMATICO (poll/boot)
+    # NAO rouba o foco (nao chama focus_force) — era isso que "nao deixava a cliente trabalhar".
+    if _config_aberta():
+        if not auto:
+            try: _janela_config.deiconify(); _janela_config.lift(); _janela_config.focus_force()
+            except Exception: pass
+        return
     cfg=carregar_config(); iw=listar_impressoras_windows(); ps=listar_portas_serial()
     w=tk.Toplevel(_root); w.title("Concentrador de Impressoes e Dispositivos")
-    w.geometry("820x700"); w.configure(bg="#1e1e2e"); w.lift(); w.focus_force()
+    w.geometry("820x700"); w.configure(bg="#1e1e2e")
+    if not auto:
+        w.lift(); w.focus_force()   # so traz pra frente/rouba foco quando o USUARIO pediu (tray/botao)
+    _janela_config = w
+    # limpa a referencia quando a janela e destruida (por qualquer caminho), p/ permitir reabrir depois
+    w.bind("<Destroy>", lambda e: (globals().__setitem__('_janela_config', None) if e.widget is w else None))
 
     sty=ttk.Style(w); sty.theme_use("clam")
     sty.configure("TNotebook",background="#1e1e2e",borderwidth=0)
@@ -3669,7 +3708,7 @@ if __name__ == "__main__":
     imps_mapeadas = [i for i in cfg.get("impressoras",[]) if i.get("nome_impressora")]
     if not imps_mapeadas:
         log.info("[APP] Sem impressoras mapeadas - abrindo configuracoes")
-        _root.after(1500, abrir_config)
+        _root.after(1500, lambda: abrir_config(auto=True))
 
     log.info(f"Restaurante: {cfg.get('restaurant_name','?')}")
     log.info(f"Impressoras: {[i.get('nome') for i in cfg.get('impressoras',[])]}")
