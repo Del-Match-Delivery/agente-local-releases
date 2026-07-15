@@ -1,5 +1,5 @@
 {
-  "version": "5.68",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.68/AgenteLocal.exe",
-  "notes": "v5.68: Fim do 'abre varias instancias apos atualizar'. Instancia unica agora por ELEICAO deterministica: o sistema mantem sempre a instancia da versao MAIS NOVA e encerra sozinho as duplicadas (empate: menor pid). Quem perde a eleicao so encerra apos confirmar que a vencedora esta viva e saudavel, entao a loja nunca fica sem agente e nao volta o 'clico e nao abre'. Um watchdog roda a cada 15s e colapsa quaisquer instancias duplicadas que surjam durante um update. Mantidas as blindagens de update da v5.67 (backup, copia, verificacao de integridade, heartbeat e rollback)."
+  "version": "5.69",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.69/AgenteLocal.exe",
+  "notes": "v5.69 (correcao critica): corrige o 'nao abre apos atualizar' que podia ocorrer na v5.68. A instancia unica agora NUNCA se auto-encerra — apenas a instancia vencedora (a mais nova) encerra as duplicadas, entao e impossivel a loja ficar sem agente. Recomendado atualizar imediatamente."
 }
