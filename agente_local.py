@@ -24,6 +24,17 @@ try:
 except ImportError:
     HAS_SERIAL = False
 
+# Selfcheckout (SCO): modulo OPCIONAL, hoje NAO empacotado. HAS_SCO/mod_sco eram USADOS
+# (salvar() da config em ~3084 e o dashboard em ~2889) mas NUNCA definidos -> NameError:
+# o salvar() quebrava ANTES de salvar_config() (config local nao persistia) e o dashboard
+# quebraria se a aba SCO fosse tocada. Definindo aqui, os 'if HAS_SCO:' viram no-op seguro.
+try:
+    import selfcheckout as mod_sco
+    HAS_SCO = True
+except Exception:
+    HAS_SCO = False
+    mod_sco = None
+
 BASE_DIR     = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
 # Garante que o log sempre fica na pasta do exe, nao na pasta de trabalho
 if getattr(sys, 'frozen', False):
@@ -402,7 +413,10 @@ def ef_poll_jobs():
         # Abre a config UMA unica vez por sessao e SEM roubar foco (auto=True). NUNCA
         # reabrir sozinho a cada oscilacao 401<->200 nem empilhar janela — era isso que
         # ficava "abrindo na tela e nao deixava trabalhar".
-        if _root and not _config_auto_ja and not _config_aberta():
+        # IMPORTANTE: este bloco roda na THREAD DO POLL (nao a da GUI). NAO chamar metodos
+        # Tkinter aqui (winfo_exists etc.) — Tkinter nao e thread-safe. A guarda de janela
+        # unica fica no proprio abrir_config, que roda na thread da GUI via _root.after.
+        if _root and not _config_auto_ja:
             _config_auto_ja = True
             _root.after(0, lambda: abrir_config(auto=True))
         # Nao loga a cada 3s para nao encher o log
@@ -1440,7 +1454,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.71"
+CURRENT_VERSION = "5.72"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
