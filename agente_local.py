@@ -1433,7 +1433,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.69"
+CURRENT_VERSION = "5.70"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -3482,8 +3482,16 @@ def _eleger_instancia_unica(motivo="boot"):
             vencedor = _decidir_vencedor(registros)
 
             if vencedor == meu_pid:
-                # EU venco (sou a mais nova / menor pid): encerro as outras.
-                outras = [p for p in vivos if p != meu_pid]
+                # EU venco: encerro as outras. CRITICO: mato SO instancias que PUBLICARAM
+                # registro (apps reais de eleicao) — NUNCA PIDs sem registro. O PyInstaller
+                # onefile roda como DOIS 'AgenteLocal.exe': o bootloader-PAI + o app-FILHO
+                # (este, que roda o Python e publica o registro). O pai NUNCA publica registro.
+                # Ate a v5.69 matavamos "todo AgenteLocal != eu", o que incluia o NOSSO
+                # bootloader-pai; taskkill /T no pai derrubava o filho junto => SUICIDIO =>
+                # 'nao abre'. Matando so registrados, o proprio pai (e o pai das outras) fica
+                # de fora, mas some sozinho: matar o app-filho faz o bootloader-pai encerrar.
+                outras = [p for p in registros
+                          if p != meu_pid and p != os.getppid()]
                 for p in outras:
                     _matar_pid(p)
                     try: (INSTANCES_DIR / f"{p}.json").unlink()
