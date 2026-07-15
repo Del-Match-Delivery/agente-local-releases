@@ -1,5 +1,5 @@
 {
-  "version": "5.69",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.69/AgenteLocal.exe",
-  "notes": "v5.69 (correcao critica): corrige o 'nao abre apos atualizar' que podia ocorrer na v5.68. A instancia unica agora NUNCA se auto-encerra — apenas a instancia vencedora (a mais nova) encerra as duplicadas, entao e impossivel a loja ficar sem agente. Recomendado atualizar imediatamente."
+  "version": "5.70",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.70/AgenteLocal.exe",
+  "notes": "v5.70 (correcao critica): corrige de vez o 'nao abre apos atualizar'. Causa: o app roda como bootloader+processo-filho (ambos AgenteLocal.exe) e a instancia unica acabava encerrando o proprio processo-pai. Agora a eleicao so encerra instancias reais duplicadas, nunca o proprio processo — validado no executavel real. Recomendado atualizar imediatamente."
 }
