@@ -1433,7 +1433,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.67"
+CURRENT_VERSION = "5.68"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -3267,7 +3267,13 @@ def _check():
             elif cmd == "dashboard": abrir_dashboard()
             elif cmd == "log":       abrir_log()
             elif cmd == "reiniciar": reiniciar_app()
-            elif cmd == "sair":      os._exit(0)
+            elif cmd == "sair":
+                try:
+                    if _meu_registro_path and _meu_registro_path.exists():
+                        _meu_registro_path.unlink()  # remove meu registro de instancia
+                except Exception:
+                    pass
+                os._exit(0)
         except Exception as e:
             log.error(f"[GUI] Erro ao abrir '{cmd}': {e}", exc_info=True)
     except queue.Empty:
@@ -3315,40 +3321,249 @@ def _escrever_heartbeat():
         pass
 
 
+# ===========================================================================
+# INSTANCIA UNICA POR ELEICAO  (v5.68)
+# ---------------------------------------------------------------------------
+# PROBLEMA que isto resolve: apos um update, a loja ficava com VARIAS instancias
+# do AgenteLocal abertas ao mesmo tempo. Causas somadas:
+#   1) Auto-start duplicado (chave Run + atalho .lnk) -> 2 lancamentos por login.
+#   2) v5.67 passou a "NUNCA sair pelo mutex" (p/ acabar com o 'clico e nao abre').
+#      Efeito colateral: quando o kill do fantasma nao funcionava (antivirus/timing),
+#      a 2a instancia seguia rodando -> duas coexistindo.
+#   3) O startup usava um "kill-guerra" SIMETRICO (cada uma matava a outra), sem
+#      vencedor deterministico -> ora sobrava 1, ora 2, ora zero.
+#   4) Com >=2 rodando, cada uma poll+checa update; no update ambas relancavam exes,
+#      e o antivirus escaneando o exe novo estourava o timeout do heartbeat -> mais
+#      relancamentos. As instancias se acumulavam.
+#
+# SOLUCAO: eleicao DETERMINISTICA. Cada instancia publica (pid, versao, heartbeat)
+# em DATA_DIR/instances. Vence SEMPRE a MAIOR versao (empate: menor pid) -> "fica so
+# a mais atualizada". Quem vence mata as outras; quem perde SO encerra apos confirmar
+# que a vencedora esta VIVA e SAUDAVEL (nunca deixa a loja sem agente; nunca sai cego).
+# Um watchdog roda a eleicao a cada ~15s, entao duplicatas que surjam (ex.: durante um
+# update) colapsam sozinhas para UMA — sem CMD, sem intervencao do lojista.
+# ===========================================================================
+INSTANCES_DIR = DATA_DIR / "instances"
+_ELEICAO_HB_STALE_S = 45   # registro sem heartbeat ha mais que isso => instancia pendurada
+_ELEICAO_INTERVALO_S = 15  # de quanto em quanto o watchdog re-roda a eleicao
+_meu_registro_path = None
+_eleicao_lock = threading.Lock()  # serializa eleicao (boot + watchdog nao se atropelam)
+
+
+def _ver_tuple(s):
+    """'5.68' -> (5, 68). Converte versao em tupla comparavel. Versao ilegivel vira (0,)
+    (perde a eleicao, o que e o correto: instancia sa/atual deve vencer uma corrompida)."""
+    try:
+        return tuple(int(x) for x in str(s).strip().split("."))
+    except Exception:
+        return (0,)
+
+
+def _escrever_registro_instancia():
+    """Publica/atualiza o registro DESTA instancia (pid, versao, exe, heartbeat) em
+    DATA_DIR/instances/<pid>.json. E o que permite a eleicao saber a VERSAO de cada
+    processo AgenteLocal vivo. Best-effort, nunca lanca."""
+    global _meu_registro_path
+    try:
+        INSTANCES_DIR.mkdir(parents=True, exist_ok=True)
+        _meu_registro_path = INSTANCES_DIR / f"{os.getpid()}.json"
+        _meu_registro_path.write_text(json.dumps({
+            "pid": os.getpid(),
+            "version": str(CURRENT_VERSION),
+            "exe": str(sys.executable),
+            "hb": time.time(),
+        }), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _listar_pids_agente():
+    """PIDs vivos de processos AgenteLocal* (via tasklist CSV; WMIC foi descontinuado)."""
+    pids = []
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq AgenteLocal*", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=6)
+        for linha in (r.stdout or "").splitlines():
+            partes = [p.strip('"') for p in linha.split('","')]
+            if len(partes) >= 2:
+                try:
+                    pids.append(int(partes[1]))
+                except ValueError:
+                    continue
+    except Exception as e:
+        log.debug(f"[ELEICAO] tasklist falhou: {e}")
+    return pids
+
+
+def _matar_pid(pid):
+    """Mata um PID (arvore inteira). Retorna True se o comando rodou."""
+    try:
+        subprocess.run(["taskkill", "/F", "/PID", str(pid), "/T"],
+                       capture_output=True, timeout=5)
+        return True
+    except Exception:
+        return False
+
+
+def _decidir_vencedor(registros):
+    """Funcao PURA (testavel): dado {pid: {"version": ...}}, devolve o pid vencedor.
+    Regra: MAIOR versao vence; empate => MENOR pid. Como todas as instancias olham os
+    mesmos registros, todas chegam ao MESMO vencedor -> exatamente uma sobrevive."""
+    vencedor = None
+    for p in registros:
+        if vencedor is None:
+            vencedor = p
+            continue
+        vp = _ver_tuple(registros[p].get("version"))
+        vw = _ver_tuple(registros[vencedor].get("version"))
+        if vp > vw or (vp == vw and p < vencedor):
+            vencedor = p
+    return vencedor
+
+
+def _eleger_instancia_unica(motivo="boot"):
+    """Eleicao DETERMINISTICA de instancia unica.
+    Vencedora = MAIOR versao; empate => MENOR pid (todas as instancias, olhando os mesmos
+    registros, calculam o MESMO vencedor).
+      - Se EU venco: mato as outras instancias AgenteLocal vivas e sigo rodando.
+      - Se NAO venco: SO encerro (os._exit) apos confirmar que a vencedora esta VIVA e com
+        heartbeat FRESCO. Se a vencedora aparente nao estiver saudavel, eu assumo o posto
+        (nunca deixa a loja sem agente).
+    Retorna True se esta instancia deve continuar. So age em modo frozen (.exe real)."""
+    if not getattr(sys, "frozen", False):
+        return True
+    if not _eleicao_lock.acquire(blocking=False):
+        return True  # ja tem uma eleicao rodando; nao empilha
+    meu_pid = os.getpid()
+    try:
+        _escrever_registro_instancia()
+        # No boot damos ate 3 passadas com espera, p/ irmas recem-lancadas publicarem o registro.
+        tentativas = 3 if motivo == "boot" else 1
+        for _t in range(tentativas):
+            vivos = set(_listar_pids_agente())
+            vivos.add(meu_pid)  # eu SEMPRE conto como vivo (mesmo se o tasklist falhar)
+            registros = {}
+            try:
+                arquivos = list(INSTANCES_DIR.glob("*.json"))
+            except Exception:
+                arquivos = []
+            for f in arquivos:
+                try:
+                    pid = int(f.stem)
+                except ValueError:
+                    try: f.unlink()
+                    except Exception: pass
+                    continue
+                if pid not in vivos:
+                    try: f.unlink()   # registro orfao: processo ja morreu
+                    except Exception: pass
+                    continue
+                try:
+                    rec = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    rec = None
+                if isinstance(rec, dict):
+                    registros[pid] = rec
+            # garante o meu proprio registro no mapa
+            registros.setdefault(meu_pid, {"pid": meu_pid, "version": str(CURRENT_VERSION),
+                                           "hb": time.time()})
+            # PIDs vivos que ainda nao publicaram registro (recem-lancados). No boot,
+            # espera e re-scaneia — pode ser uma versao MAIS NOVA subindo.
+            desconhecidos = [p for p in vivos if p not in registros]
+            if desconhecidos and _t < tentativas - 1:
+                time.sleep(2)
+                _escrever_registro_instancia()
+                continue
+
+            # ---- decide o vencedor: maior versao, empate menor pid ----
+            vencedor = _decidir_vencedor(registros)
+
+            if vencedor == meu_pid:
+                # EU venco (sou a mais nova / menor pid): encerro as outras.
+                outras = [p for p in vivos if p != meu_pid]
+                for p in outras:
+                    _matar_pid(p)
+                    try: (INSTANCES_DIR / f"{p}.json").unlink()
+                    except Exception: pass
+                if outras:
+                    log.info(f"[ELEICAO/{motivo}] Instancia vencedora v{CURRENT_VERSION} "
+                             f"pid={meu_pid}; encerrei {len(outras)} extra: {outras}")
+                return True
+
+            # NAO venco: so cedo se a vencedora estiver VIVA e SAUDAVEL.
+            rec = registros.get(vencedor, {})
+            hb = rec.get("hb", 0)
+            saudavel = (vencedor in vivos) and ((time.time() - hb) < _ELEICAO_HB_STALE_S)
+            if saudavel:
+                log.info(f"[ELEICAO/{motivo}] Ja existe instancia vencedora pid={vencedor} "
+                         f"v{rec.get('version')} (saudavel). Encerrando esta pid={meu_pid} "
+                         f"v{CURRENT_VERSION} para nao duplicar.")
+                try:
+                    if _meu_registro_path and _meu_registro_path.exists():
+                        _meu_registro_path.unlink()
+                except Exception:
+                    pass
+                try:
+                    if _tray_icon:
+                        _tray_icon.stop()
+                except Exception:
+                    pass
+                os._exit(0)
+            else:
+                # Vencedora aparente NAO esta saudavel (morta/pendurada): assumo o posto.
+                log.warning(f"[ELEICAO/{motivo}] Vencedora aparente pid={vencedor} nao esta "
+                            f"saudavel; matando-a e assumindo (nunca deixa a loja sem agente).")
+                _matar_pid(vencedor)
+                try: (INSTANCES_DIR / f"{vencedor}.json").unlink()
+                except Exception: pass
+                # deixa o watchdog re-eleger no proximo ciclo p/ limpar o resto
+                return True
+        return True
+    except Exception as e:
+        log.warning(f"[ELEICAO/{motivo}] Falha na eleicao ({e}); seguindo rodando por seguranca.")
+        return True
+    finally:
+        try: _eleicao_lock.release()
+        except Exception: pass
+
+
+def _watchdog_instancia():
+    """Roda a eleicao periodicamente. E o que faz duplicatas que surjam DEPOIS do boot
+    (tipicamente durante um update) colapsarem sozinhas para UMA instancia, sem CMD."""
+    while True:
+        try:
+            time.sleep(_ELEICAO_INTERVALO_S)
+            _escrever_registro_instancia()   # mantem meu heartbeat fresco p/ as outras me verem vivo
+            _eleger_instancia_unica("watchdog")
+        except Exception as e:
+            log.debug(f"[ELEICAO/watchdog] {e}")
+
+
 if __name__ == "__main__":
     if getattr(sys, 'frozen', False):
-        import ctypes
+        # 1) Publica meu registro (pid + versao) o QUANTO ANTES, p/ que a eleicao de
+        #    qualquer instancia (a minha e a das outras) enxergue a MINHA versao.
+        _escrever_registro_instancia()
 
-        # 1) Limpa instancias travadas (por curinga, pega versionados)
-        _matar_outras_instancias()
-        time.sleep(2)  # aguarda processos morrerem antes de continuar
-
-        # 2) Mutex global — instancia unica, MAS sem travar a reabertura.
-        # Se o mutex ja existe, e porque uma instancia fantasma sobreviveu a limpeza.
-        # Em vez de encerrar em silencio (bug que fazia "clico e nao abre"), tentamos
-        # matar de novo e re-adquirir. So se REALMENTE nao conseguir apos 3 tentativas
-        # e continuar sinalizado, aceitamos e seguimos assim mesmo (melhor 2 rodando por
-        # instantes do que a loja sem agente). NUNCA sys.exit por causa disso.
-        _mutex_handle = None
-        for _tent in range(3):
-            _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, True, "AgenteLocalMIA_SingleInstance")
-            if ctypes.windll.kernel32.GetLastError() != 183:  # 183 = ERROR_ALREADY_EXISTS
-                break
-            log.warning(f"[STARTUP] Mutex ocupado (tentativa {_tent+1}/3) — matando fantasma e tentando de novo")
-            try:
-                ctypes.windll.kernel32.CloseHandle(_mutex_handle)
-            except Exception:
-                pass
-            _matar_outras_instancias()
-            time.sleep(2)
-        else:
-            log.warning("[STARTUP] Mutex seguiu ocupado apos 3 tentativas — seguindo mesmo assim (nao encerra)")
-
-        # 3) Heartbeat: sinaliza que este exe subiu (o bat de update aguarda isso p/ rollback)
+        # 2) Heartbeat de update (.boot_ok): sinaliza que este exe subiu (o bat de update
+        #    aguarda isso p/ rollback). Escrito cedo, antes de qualquer coisa lenta.
         _escrever_heartbeat()
+
+        # 3) ELEICAO de instancia unica (substitui o antigo kill-guerra simetrico + mutex,
+        #    que ora deixava 2, ora zero). Mantem SEMPRE a instancia da MAIOR versao
+        #    (empate: menor pid). Se eu venco, encerro as outras; se perco, SO encerro apos
+        #    confirmar que a vencedora esta viva e saudavel. Nunca deixa a loja sem agente,
+        #    nunca sai "cego" (fim tanto do 'clico e nao abre' quanto do 'abre varias').
+        _eleger_instancia_unica("boot")
 
         # 4) Auto-reparo: normaliza nome versionado -> AgenteLocal.exe e limpa orfaos
         _auto_reparo_boot()
+
+        # 5) Watchdog continuo: se em qualquer momento surgirem instancias duplicadas
+        #    (tipicamente durante um update), a eleicao roda de novo e colapsa p/ UMA
+        #    (a mais nova) em ~15s, sozinho, sem CMD/intervencao do lojista.
+        threading.Thread(target=_watchdog_instancia, daemon=True).start()
 
     log.info(f"=== Concentrador de Impressoes e Dispositivos v{CURRENT_VERSION} iniciando ===")
 
