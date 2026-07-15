@@ -1433,7 +1433,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.68"
+CURRENT_VERSION = "5.69"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -3427,9 +3427,9 @@ def _eleger_instancia_unica(motivo="boot"):
     Vencedora = MAIOR versao; empate => MENOR pid (todas as instancias, olhando os mesmos
     registros, calculam o MESMO vencedor).
       - Se EU venco: mato as outras instancias AgenteLocal vivas e sigo rodando.
-      - Se NAO venco: SO encerro (os._exit) apos confirmar que a vencedora esta VIVA e com
-        heartbeat FRESCO. Se a vencedora aparente nao estiver saudavel, eu assumo o posto
-        (nunca deixa a loja sem agente).
+      - Se NAO venco: eu NUNCA me auto-encerro (sigo rodando); a vencedora e quem me encerra.
+        So mato/assumo se a 'vencedora' estiver morta/pendurada. Assim ZERO instancias e
+        impossivel (fim do 'nao abre') e as duplicatas colapsam mesmo assim.
     Retorna True se esta instancia deve continuar. So age em modo frozen (.exe real)."""
     if not getattr(sys, "frozen", False):
         return True
@@ -3438,8 +3438,10 @@ def _eleger_instancia_unica(motivo="boot"):
     meu_pid = os.getpid()
     try:
         _escrever_registro_instancia()
-        # No boot damos ate 3 passadas com espera, p/ irmas recem-lancadas publicarem o registro.
-        tentativas = 3 if motivo == "boot" else 1
+        # Grace: se ha PIDs vivos que ainda nao publicaram registro (pode ser uma versao MAIS
+        # NOVA subindo), espera e re-scaneia antes de decidir — no boot 3 passadas, no watchdog
+        # 2 (evita que uma instancia velha mate a nova que ainda esta escrevendo o registro).
+        tentativas = 3 if motivo == "boot" else 2
         for _t in range(tentativas):
             vivos = set(_listar_pids_agente())
             vivos.add(meu_pid)  # eu SEMPRE conto como vivo (mesmo se o tasklist falhar)
@@ -3491,25 +3493,24 @@ def _eleger_instancia_unica(motivo="boot"):
                              f"pid={meu_pid}; encerrei {len(outras)} extra: {outras}")
                 return True
 
-            # NAO venco: so cedo se a vencedora estiver VIVA e SAUDAVEL.
+            # NAO venco. REGRA DE OURO: eu NUNCA me auto-encerro (os._exit). Encerrar a si
+            # mesmo causava o bug "nao abre": quando o 'vencedor' era um processo que JA tinha
+            # morrido mas ainda aparecia no tasklist (o taskkill /F nao some com ele na hora) e
+            # o arquivo de registro dele ainda estava fresco, a instancia VIVA cedia a um morto
+            # -> ZERO instancias. Quem colapsa duplicatas e SEMPRE a vencedora, matando as
+            # outras. Como a vencedora nunca se mata e mata-mutua e impossivel (decisao
+            # deterministica), zero-instancias fica IMPOSSIVEL.
             rec = registros.get(vencedor, {})
             hb = rec.get("hb", 0)
             saudavel = (vencedor in vivos) and ((time.time() - hb) < _ELEICAO_HB_STALE_S)
             if saudavel:
-                log.info(f"[ELEICAO/{motivo}] Ja existe instancia vencedora pid={vencedor} "
-                         f"v{rec.get('version')} (saudavel). Encerrando esta pid={meu_pid} "
-                         f"v{CURRENT_VERSION} para nao duplicar.")
-                try:
-                    if _meu_registro_path and _meu_registro_path.exists():
-                        _meu_registro_path.unlink()
-                except Exception:
-                    pass
-                try:
-                    if _tray_icon:
-                        _tray_icon.stop()
-                except Exception:
-                    pass
-                os._exit(0)
+                # Existe uma vencedora real e saudavel: eu SIGO RODANDO; ela vai me encerrar
+                # no ciclo de eleicao dela (boot dela ou watchdog em ate ~15s). Melhor uma
+                # duplicata por instantes do que a loja sem agente.
+                log.info(f"[ELEICAO/{motivo}] Existe instancia vencedora pid={vencedor} "
+                         f"v{rec.get('version')}; sigo rodando (ela colapsa duplicatas). "
+                         f"eu=pid{meu_pid} v{CURRENT_VERSION}")
+                return True
             else:
                 # Vencedora aparente NAO esta saudavel (morta/pendurada): assumo o posto.
                 log.warning(f"[ELEICAO/{motivo}] Vencedora aparente pid={vencedor} nao esta "
@@ -3552,9 +3553,9 @@ if __name__ == "__main__":
 
         # 3) ELEICAO de instancia unica (substitui o antigo kill-guerra simetrico + mutex,
         #    que ora deixava 2, ora zero). Mantem SEMPRE a instancia da MAIOR versao
-        #    (empate: menor pid). Se eu venco, encerro as outras; se perco, SO encerro apos
-        #    confirmar que a vencedora esta viva e saudavel. Nunca deixa a loja sem agente,
-        #    nunca sai "cego" (fim tanto do 'clico e nao abre' quanto do 'abre varias').
+        #    (empate: menor pid). Se eu venco, encerro as outras; se NAO venco eu NUNCA me
+        #    auto-encerro (sigo rodando) — a vencedora e quem colapsa as duplicatas. Assim
+        #    ZERO instancias e impossivel (fim do 'clico e nao abre' E do 'abre varias').
         _eleger_instancia_unica("boot")
 
         # 4) Auto-reparo: normaliza nome versionado -> AgenteLocal.exe e limpa orfaos
