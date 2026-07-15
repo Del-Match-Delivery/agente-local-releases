@@ -35,6 +35,12 @@ except Exception:
     HAS_SCO = False
     mod_sco = None
 
+# Esconde a janela de console dos subprocessos (tasklist/taskkill/powershell). O app e
+# windowed (compilado com console=False); SEM esta flag, CADA subprocess.run PISCA um CMD
+# na tela do cliente. Como o watchdog da eleicao roda tasklist a cada 15s, dava "o cmd
+# fica abrindo toda hora". (subprocess.CREATE_NO_WINDOW = 0x08000000)
+_NO_WINDOW = 0x08000000
+
 BASE_DIR     = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
 # Garante que o log sempre fica na pasta do exe, nao na pasta de trabalho
 if getattr(sys, 'frozen', False):
@@ -179,7 +185,7 @@ def listar_impressoras_windows():
         except: pass
     try:
         r = subprocess.run(["powershell","-Command","Get-Printer | Select-Object -ExpandProperty Name"],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
         return [l.strip() for l in r.stdout.splitlines() if l.strip()]
     except: return []
 
@@ -262,7 +268,7 @@ def _garantir_startup():
                     try:
                         check_ps = f'$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut("{lnk_path}"); Write-Output $s.TargetPath'
                         r = subprocess.run(["powershell", "-NoProfile", "-Command", check_ps],
-                                           capture_output=True, text=True, timeout=5)
+                                           capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
                         target_atual = r.stdout.strip().strip('"')
                         if target_atual.lower() == exe.lower():
                             precisa_recriar = False
@@ -278,7 +284,7 @@ def _garantir_startup():
                           f'$s.WindowStyle=7;'
                           f'$s.Save()')
                     subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                                   capture_output=True, timeout=10)
+                                   capture_output=True, timeout=10, creationflags=_NO_WINDOW)
                     log.info(f"[STARTUP] Atalho criado/corrigido -> {exe}")
         except Exception as e:
             log.warning(f"[STARTUP] Atalho falhou: {e}")
@@ -1454,7 +1460,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.72"
+CURRENT_VERSION = "5.73"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -3045,7 +3051,7 @@ def abrir_config(auto=False):
             atalho = str(d / "Agente Local.lnk")
             ps = f'''$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut("{atalho}"); $s.TargetPath="{exe}"; $s.WorkingDirectory="{Path(exe).parent}"; $s.Description="Agente Local MIA"; $s.Save()'''
             r = subprocess.run(["powershell","-NoProfile","-NonInteractive","-Command", ps],
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW)
             if r.returncode == 0 and Path(atalho).exists():
                 messagebox.showinfo("OK", f"Atalho criado em:\n{atalho}", parent=w)
             else:
@@ -3344,7 +3350,7 @@ def _matar_outras_instancias():
         # Lista PIDs de processos AgenteLocal* via tasklist CSV (robusto, sem WMIC)
         r = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq AgenteLocal*", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=6
+            capture_output=True, text=True, timeout=6, creationflags=_NO_WINDOW
         )
         for linha in (r.stdout or "").splitlines():
             partes = [p.strip().strip('"') for p in linha.split('","')]
@@ -3356,7 +3362,7 @@ def _matar_outras_instancias():
                     continue
                 if pid_outro != meu_pid and pid_outro > 0:
                     subprocess.run(["taskkill", "/F", "/PID", str(pid_outro), "/T"],
-                                   capture_output=True, timeout=5)
+                                   capture_output=True, timeout=5, creationflags=_NO_WINDOW)
                     mortos += 1
                     log.info(f"[STARTUP] Matou instancia paralela PID={pid_outro} ({partes[0]})")
     except Exception as e:
@@ -3436,7 +3442,7 @@ def _listar_pids_agente():
     try:
         r = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq AgenteLocal*", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=6)
+            capture_output=True, text=True, timeout=6, creationflags=_NO_WINDOW)
         for linha in (r.stdout or "").splitlines():
             partes = [p.strip('"') for p in linha.split('","')]
             if len(partes) >= 2:
@@ -3453,7 +3459,7 @@ def _matar_pid(pid):
     """Mata um PID (arvore inteira). Retorna True se o comando rodou."""
     try:
         subprocess.run(["taskkill", "/F", "/PID", str(pid), "/T"],
-                       capture_output=True, timeout=5)
+                       capture_output=True, timeout=5, creationflags=_NO_WINDOW)
         return True
     except Exception:
         return False
