@@ -1,5 +1,5 @@
 {
-  "version": "5.71",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.71/AgenteLocal.exe",
-  "notes": "v5.71 (correcao): a janela de configuracao/status nao abre mais sozinha nem rouba o foco enquanto o operador trabalha. A tela agora e unica (nao empilha) e so vem para frente quando VOCE abre pela bandeja; no modo automatico nao rouba o foco e abre no maximo uma vez por sessao. Recomendado atualizar."
+  "version": "5.73",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.73/AgenteLocal.exe",
+  "notes": "v5.73 (correcoes acumuladas): (1) a janela de config/status nao abre mais sozinha nem rouba o foco; (2) o Salvar/fechar da configuracao volta a gravar de verdade (antes um erro interno impedia); (3) FIM do CMD piscando na tela — os comandos internos (tasklist/taskkill) agora rodam sem abrir janela de console. Recomendado atualizar."
 }
