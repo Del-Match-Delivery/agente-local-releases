@@ -556,6 +556,56 @@ def _callback_peso(nome, peso_kg, status):
         _ultimo_envio_peso[nome] = agora
         ef_enviar_peso(nome, peso_kg)
 
+import unicodedata
+
+# Tabela de codigo ESC/POS por encoding (ESC t n).
+# O texto sempre foi codificado em cp850, mas o comando ESC t nunca era enviado — entao a
+# impressora ficava no PC437 de fabrica, onde os bytes de 'ã'(C6) e 'õ'(E4) sao moldura
+# (╞, Σ) e todo acento MAIUSCULO tambem quebra. Os minusculos (á é í ó ú â ê ô ç ü) tem o
+# mesmo byte nas duas tabelas, por isso so "varios" acentos saiam errados, nao todos.
+CP_TAB={"cp850":2,"cp437":0,"cp860":3,"cp858":19,"cp1252":16}
+# Caracteres que nao existem em cp850 e chegam do cadastro (aspas curvas, travessao...)
+TRANS={"–":"-","—":"-","‒":"-","―":"-","‘":"'","’":"'",
+       "‚":"'","“":'"',"”":'"',"„":'"',"…":"...","•":"*",
+       "→":"->"," ":" ","​":"","⁄":"/","−":"-","ʼ":"'"}
+
+def _cp():
+    """Encoding configurado pra impressora (o padrao cp850 cobre portugues)."""
+    e=str(cfg.get("codepage","cp850")).lower().replace("-","")
+    return e if e in CP_TAB else "cp850"
+
+def _escpos_cp():
+    """Comando ESC t que poe a impressora no mesmo codepage em que o texto e codificado."""
+    return bytes([0x1b,0x74,CP_TAB[_cp()]])
+
+def _txt(s):
+    """Normaliza texto pra impressao: compoe acentos (NFC) e troca o que nao existe no
+    codepage por equivalente ASCII. Precisa rodar ANTES do calculo de colunas, senao
+    'a'+acento separados contam 2 caracteres e desalinham a coluna de preco."""
+    if not isinstance(s,str) or not s: return s
+    s=unicodedata.normalize("NFC",s)
+    return "".join(TRANS.get(c,c) for c in s)
+
+def _norm(v):
+    """Aplica _txt em todo texto do content, inclusive dentro de listas/dicts."""
+    if isinstance(v,str): return _txt(v)
+    if isinstance(v,list): return [_norm(x) for x in v]
+    if isinstance(v,dict): return {k:_norm(x) for k,x in v.items()}
+    return v
+
+def _enc(texto):
+    """Codifica pro codepage da impressora. Caractere sem equivalente perde o acento em vez
+    de virar '?'; se nem assim couber (emoji, simbolo), e descartado. Substitui o antigo
+    .encode('cp850','replace'), que enchia o cupom de '?'."""
+    enc=_cp(); out=bytearray()
+    for c in texto:
+        try: out+=c.encode(enc); continue
+        except UnicodeEncodeError: pass
+        base="".join(x for x in unicodedata.normalize("NFKD",c) if not unicodedata.combining(x))
+        try: out+=base.encode(enc)
+        except UnicodeEncodeError: pass
+    return bytes(out)
+
 def _escpos_font_prefix():
     """Retorna bytes ESC/POS para o tamanho de fonte configurado (0=normal,1=duplo,2=triplo)."""
     n = int(cfg.get("font_size", 0))
@@ -580,14 +630,14 @@ def _substituir_marcadores_escpos(texto):
         texto = str(texto) if texto is not None else ""
     if "[[BIG_ORDER_ON]]" not in texto:
         # Caminho rapido: sem marcador, encode direto em bloco
-        return texto.encode("cp850", "replace")
-    # Substitui marcadores por placeholders que sobrevivem ao encode cp850
+        return _enc(_txt(texto))
+    # Substitui marcadores por placeholders que sobrevivem ao encode
     texto = texto.replace("[[BIG_ORDER_ON]]",  _MARCADOR_ON_PLACEHOLDER)
     texto = texto.replace("[[BIG_ORDER_OFF]]", _MARCADOR_OFF_PLACEHOLDER)
-    dados = texto.encode("cp850", "replace")
-    # Troca placeholders pelos bytes ESC/POS
-    dados = dados.replace(_MARCADOR_ON_PLACEHOLDER.encode("cp850"),  _ESCPOS_BIG_ON)
-    dados = dados.replace(_MARCADOR_OFF_PLACEHOLDER.encode("cp850"), _ESCPOS_BIG_OFF)
+    dados = _enc(_txt(texto))
+    # Troca placeholders pelos bytes ESC/POS (placeholders sao ASCII: _enc nao os altera)
+    dados = dados.replace(_enc(_MARCADOR_ON_PLACEHOLDER),  _ESCPOS_BIG_ON)
+    dados = dados.replace(_enc(_MARCADOR_OFF_PLACEHOLDER), _ESCPOS_BIG_OFF)
     return dados
 
 def _imprimir_raw(nome, conteudo):
@@ -601,7 +651,8 @@ def _imprimir_raw(nome, conteudo):
                 # Se for string, codifica com prefixo de tamanho de fonte. Se for bytes (RAW), envia direto.
                 if isinstance(conteudo, str):
                     corpo = _substituir_marcadores_escpos(conteudo + "\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")
-                    payload = _escpos_font_prefix() + corpo
+                    # ESC t antes do texto: sem isso a impressora fica no PC437 e os acentos quebram
+                    payload = _escpos_cp() + _escpos_font_prefix() + corpo
                     win32print.WritePrinter(h, payload)
                 else:
                     win32print.WritePrinter(h, conteudo)
@@ -625,7 +676,8 @@ def _imprimir_tcp(endereco, conteudo):
         with socket.create_connection((host, porta), timeout=10) as s:
             if isinstance(conteudo, str):
                 corpo = _substituir_marcadores_escpos(conteudo + "\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")
-                payload = _escpos_font_prefix() + corpo
+                # ESC t antes do texto: sem isso a impressora fica no PC437 e os acentos quebram
+                payload = _escpos_cp() + _escpos_font_prefix() + corpo
             else:
                 payload = conteudo
             s.sendall(payload)
@@ -793,8 +845,17 @@ def _adicionais_do_item(item):
             if v not in (None, "", 0): return str(v).strip()
         return ""
 
+    def _rotas_adicional(a):
+        """routed_to: setores para onde este adicional foi roteado (contrato de 2026-07-27).
+        Ausente = adicional nao roteado (comportamento historico)."""
+        if not isinstance(a, dict): return []
+        rt = a.get("routed_to")
+        if isinstance(rt, str): rt = [rt]
+        if not isinstance(rt, list): return []
+        return [str(s) for s in rt if s]
+
     resultado = []
-    vistos = set()  # dedup: por id quando existe; senao por (nome_lower, preco)
+    vistos = {}  # dedup: por id quando existe; senao por (nome_lower, preco)
     for chave in ("adicionais", "addons", "addons_json", "selections_json", "customizations_json"):
         ads = item.get(chave)
         if not isinstance(ads, list) or not ads:
@@ -805,12 +866,19 @@ def _adicionais_do_item(item):
             if not nome: continue
             preco = _preco_adicional(a)
             aid = _id_adicional(a)
+            rotas = _rotas_adicional(a)
             # Prioriza o ID (distingue escolhas de grupos distintos com texto igual);
             # sem ID, mantem o dedup historico por (nome+preco).
             chave_dedup = ("id", aid) if aid else (nome.strip().lower(), preco)
-            if chave_dedup in vistos: continue
-            vistos.add(chave_dedup)
-            resultado.append({"nome": nome, "preco_cents": preco})
+            if chave_dedup in vistos:
+                # Mesma escolha vinda de outra chave: aproveita o routed_to se o 1o nao trouxe,
+                # senao a rota se perderia dependendo da ordem em que as chaves foram lidas.
+                if rotas and not vistos[chave_dedup].get("routed_to"):
+                    vistos[chave_dedup]["routed_to"] = rotas
+                continue
+            entrada = {"nome": nome, "preco_cents": preco, "routed_to": rotas}
+            vistos[chave_dedup] = entrada
+            resultado.append(entrada)
     return resultado
 
 def _obs_do_item(item):
@@ -828,11 +896,45 @@ def _nome_do_item(item):
     if not isinstance(item, dict): return ""
     return item.get("nome") or item.get("name") or ""
 
+def _size_do_item(item):
+    """Retorna o tamanho/variacao do item (ex.: 'Copo 770ml'). Aceita 'size_name'
+    (novo servidor) ou 'tamanho' como alias. '' quando nao houver."""
+    if not isinstance(item, dict): return ""
+    v = item.get("size_name") or item.get("tamanho") or ""
+    return str(v).strip()
+
+def _nome_com_tamanho(item):
+    """Nome do item com o tamanho/variacao entre parenteses, quando houver.
+    Ex.: 'Monte seu Copo (Copo 770ml)'. Sem tamanho, retorna so o nome.
+    Produtos que 'substituem preco base' (Monte seu Copo, sabor do Subway) usam
+    o tamanho para definir o preco — precisa sair proeminente no cabecalho."""
+    nome = _nome_do_item(item)
+    size = _size_do_item(item)
+    return f"{nome} ({size})" if size else nome
+
 def _preco_do_item(item):
     """Retorna preco unitario em centavos.
     Aceita 'preco_cents' (novo), 'priceCents' (camelCase cru) ou 'unit_price_cents' (legado)."""
     if not isinstance(item, dict): return 0
     return item.get("preco_cents") or item.get("priceCents") or item.get("unit_price_cents") or 0
+
+# Rotulos dos setores no sufixo de roteamento dos adicionais
+SL={"bar":"Bar","kitchen":"Cozinha","cozinha":"Cozinha","copa":"Copa","receipt":"Caixa","caixa":"Caixa"}
+
+def _rota_sufixo(a):
+    """Sufixo ' -> Bar' no adicional que foi roteado para outro setor (contrato 2026-07-27).
+    Usa '->' e nao a seta unicode: '→' nao existe em cp850 e sairia como '?' no papel."""
+    rt = a.get("routed_to") if isinstance(a, dict) else None
+    if not rt: return ""
+    return " -> " + ", ".join(SL.get(str(s).lower(), str(s).title()) for s in rt)
+
+def _linha_pai(item, ind="  "):
+    """Linha de origem de um adicional roteado: o item e um adicional que caiu na comanda
+    deste setor, entao mostra de qual produto ele veio. Fonte B (menor) via ESC/POS.
+    Sem is_addon_line/parent_name retorna [] — payload antigo nao muda."""
+    if not isinstance(item, dict) or not item.get("is_addon_line"): return []
+    pai = item.get("parent_name") or ""
+    return [f"{ind}\x1b\x4d\x01({pai})\x1b\x4d\x00"] if pai else []
 
 def _li(q,n,p,w=None):
     w=w or W; b=f"[ {q}x ]  {n}"
@@ -933,6 +1035,9 @@ def _fmt(content, jt, pt):
     # para que o resto do codigo continue lendo do 'content' plano.
     # Campos de nivel do content (auto_print, paper_width, company_name, etc.) tem prioridade
     # sobre os campos de dentro do pedido (para nao sobrescrever config do restaurante).
+    # Acentos compostos (NFC) antes de qualquer medicao de coluna: se o nome vier decomposto
+    # ('a'+acento separados), len() conta 2 e a coluna de preco desalinha.
+    content = _norm(content)
     _pedido = content.get("pedido")
     if isinstance(_pedido, dict):
         _merged = dict(_pedido)
@@ -988,9 +1093,13 @@ def _fmt(content, jt, pt):
         ll.append(S)
         DP="·"*w
         for item in _itens_do_content(content):
-            ll.append(_li(_qtd_do_item(item), _nome_do_item(item), _preco_do_item(item), w))
+            size=_size_do_item(item)
+            ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
+            ll += _linha_pai(item)
             for a in _adicionais_do_item(item):
+                if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                 pc=a.get("preco_cents",0)
+                # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
                 ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
             obs=_obs_do_item(item)
             if obs: ll.append(f"  >> {obs}")
@@ -1046,12 +1155,19 @@ def _fmt(content, jt, pt):
             # Fonte normal: comportamento original — tudo em string
             ll += cab
             DP="·"*w
-            for item in _itens_do_content(content):
-                q=_qtd_do_item(item); ll.append(f"[ {q}x ]  {_nome_do_item(item)}")
-                for a in _adicionais_do_item(item): ll.append(f"  + {a.get('nome','')}")
+            itens=_itens_do_content(content)
+            for item in itens:
+                size=_size_do_item(item)
+                q=_qtd_do_item(item); ll.append(f"[ {q}x ]  {_nome_com_tamanho(item)}")
+                ll += _linha_pai(item)
+                for a in _adicionais_do_item(item):
+                    if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
+                    ll.append(f"  + {a.get('nome','')}{_rota_sufixo(a)}")
                 obs=_obs_do_item(item)
                 if obs: ll.append(f"  >> {obs}")
                 ll.append(DP)
+            # Um setor pode receber comanda sem item proprio (ex: bar so com bebida de combo)
+            if not itens: ll.append("  (sem itens para este setor)"); ll.append(DP)
             obs2=content.get("notes","")
             if obs2: ll.append(S); ll.append(f"OBS: {obs2}")
             ll.append(S)
@@ -1061,25 +1177,34 @@ def _fmt(content, jt, pt):
             FNORMAL = b"\x1b\x21\x00"
             FBIG    = _escpos_font_prefix()
             DP_str  = "·"*w
-            parts = [FNORMAL]
-            enc = lambda s: (s+"\n").encode("cp850","replace")
+            # ESC t primeiro: este caminho devolve bytes e vai direto pra impressora,
+            # sem passar pelo prefixo montado em _imprimir_raw/_imprimir_tcp.
+            parts = [_escpos_cp(), FNORMAL]
+            enc = lambda s: _enc(_txt(s)+"\n")
             for linha in cab:
                 if "[[BIG_ORDER_ON]]" in linha:
                     # Substitui marcadores por bytes ESC/POS reais
                     parts.append(_substituir_marcadores_escpos(linha + "\n"))
                 else:
                     parts.append(enc(linha))
-            for item in _itens_do_content(content):
+            itens=_itens_do_content(content)
+            for item in itens:
                 q=_qtd_do_item(item)
-                nome=_nome_do_item(item)
+                size=_size_do_item(item)
+                nome=_nome_com_tamanho(item)
                 parts.append(FBIG)
                 parts.append(enc(f"[ {q}x ]  {nome}"))
                 parts.append(FNORMAL)
+                for linha in _linha_pai(item): parts.append(enc(linha))
                 for a in _adicionais_do_item(item):
-                    parts.append(enc(f"  + {a.get('nome','')}"))
+                    if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
+                    parts.append(enc(f"  + {a.get('nome','')}{_rota_sufixo(a)}"))
                 obs=_obs_do_item(item)
                 if obs: parts.append(enc(f"  >> {obs}"))
                 parts.append(enc(DP_str))
+            # Um setor pode receber comanda sem item proprio (ex: bar so com bebida de combo)
+            if not itens:
+                parts.append(enc("  (sem itens para este setor)")); parts.append(enc(DP_str))
             obs2=content.get("notes","")
             if obs2:
                 parts.append(enc(S))
@@ -1109,9 +1234,13 @@ def _fmt(content, jt, pt):
         ll.append(S)
         DP="·"*w
         for item in _itens_do_content(content):
-            ll.append(_li(_qtd_do_item(item), _nome_do_item(item), _preco_do_item(item), w))
+            size=_size_do_item(item)
+            ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
+            ll += _linha_pai(item)
             for a in _adicionais_do_item(item):
+                if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                 pc=a.get("preco_cents",0)
+                # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
                 ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
             obs=_obs_do_item(item)
             if obs: ll.append(f"  >> {obs}")
@@ -1148,9 +1277,13 @@ def _fmt(content, jt, pt):
         ll.append(S)
         DP="·"*w
         for item in _itens_do_content(content):
-            ll.append(_li(_qtd_do_item(item), _nome_do_item(item), _preco_do_item(item), w))
+            size=_size_do_item(item)
+            ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
+            ll += _linha_pai(item)
             for a in _adicionais_do_item(item):
+                if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                 pc=a.get("preco_cents",0)
+                # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
                 ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
             obs=_obs_do_item(item)
             if obs: ll.append(f"  >> {obs}")
@@ -1282,6 +1415,7 @@ def proc_job(job):
                 content["items"] = [
                     {
                         "name": it.get("name_snapshot") or it.get("product_name") or it.get("name",""),
+                        "size_name": it.get("size_name","") or it.get("tamanho",""),
                         "quantity": it.get("quantity",1),
                         "unit_price_cents": it.get("price_cents_snapshot") or it.get("unit_price_cents",0),
                         "notes": it.get("notes",""),
@@ -1460,7 +1594,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.73"
+CURRENT_VERSION = "5.74"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
@@ -2118,6 +2252,7 @@ def abrir_dashboard():
                 if "order_items" in resp and "items" not in resp:
                     raw_items = resp.get("order_items") or []
                     resp["items"] = [{"name": it.get("name_snapshot") or it.get("product_name") or it.get("name",""),
+                                      "size_name": it.get("size_name","") or it.get("tamanho",""),
                                       "quantity": it.get("quantity",1), "unit_price_cents": it.get("price_cents_snapshot") or it.get("unit_price_cents",0),
                                       "notes": it.get("notes",""), "addons": it.get("addons_json") or it.get("addons",[])} for it in raw_items]
                 imp = _res_imp_por_rede(pt_orig); pt_uso = pt_orig
