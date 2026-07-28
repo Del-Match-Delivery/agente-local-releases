@@ -1,5 +1,5 @@
 {
-  "version": "5.73",
-  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.73/AgenteLocal.exe",
-  "notes": "v5.73 (correcoes acumuladas): (1) a janela de config/status nao abre mais sozinha nem rouba o foco; (2) o Salvar/fechar da configuracao volta a gravar de verdade (antes um erro interno impedia); (3) FIM do CMD piscando na tela — os comandos internos (tasklist/taskkill) agora rodam sem abrir janela de console. Recomendado atualizar."
+  "version": "5.74",
+  "url": "https://github.com/delmatch-user/agente-local-releases/releases/download/v5.74/AgenteLocal.exe",
+  "notes": "v5.74 (impressao): (1) FIM dos acentos quebrados no cupom — a impressora nunca era colocada no codepage certo, entao 'pao', 'limao' e os acentos MAIUSCULOS saiam como caractere de moldura; agora sai correto nas 3 formas de impressao; (2) nome de produto com acento nao desalinha mais a coluna de preco; (3) adicional mandado para outro setor aparece com ' -> Bar' na comanda, e a comanda do setor de destino mostra de qual produto o adicional veio; (4) comanda de setor sem item proprio (ex: bar so com bebida de combo) nao sai mais em branco; (5) tamanho/variacao do produto no cabecalho do item. Recomendado atualizar."
 }
