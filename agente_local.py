@@ -795,7 +795,17 @@ def _itens_do_content(content):
         if isinstance(itens, list):
             return itens
     itens = content.get("itens") or content.get("items")
-    return itens if isinstance(itens, list) else []
+    if isinstance(itens, list):
+        return itens
+    # 4. content.order.items (shape do print-agent-poll). ULTIMO recurso de proposito: so entra
+    #    quando nada acima casou, ou seja, em payload que hoje imprimiria ZERO item. Nenhum job
+    #    que ja funciona muda de fonte de itens por causa disto.
+    order = content.get("order")
+    if isinstance(order, dict):
+        itens = order.get("items") or order.get("itens")
+        if isinstance(itens, list):
+            return itens
+    return []
 
 def _adicionais_do_item(item):
     """Retorna lista normalizada de adicionais/escolhas/customizacoes do item.
@@ -918,6 +928,130 @@ def _preco_do_item(item):
     if not isinstance(item, dict): return 0
     return item.get("preco_cents") or item.get("priceCents") or item.get("unit_price_cents") or 0
 
+# ─────────────────────────────────────────────────────────────────────────────
+# AGRUPAMENTO POR CATEGORIA (contrato do servidor de 2026-07-31)
+#
+# Existe loja que guarda o TAMANHO da marmita na CATEGORIA do produto, nao no nome: o catalogo
+# tem "Marmitex Pequena", "Marmitex Media", "Marmitex Executiva" — e produtos de nome IDENTICO
+# em mais de uma ("Boi e Queijo" em Media E em Pequena). O cupom saia "[ 1x ] Boi e Queijo" e
+# nem a cozinha nem o balcao tinham como saber qual tamanho montar.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _categoria_do_item(item):
+    """Categoria do produto (ex.: 'Marmitex Media'). Aceita 'category_name' (contrato do
+    servidor) ou 'categoria' (mesmo dado em pt-BR, endpoint agent-jobs). '' quando nao houver.
+
+    null/ausente e LEGITIMO e comum: item sem produto vinculado, linha que e um adicional
+    roteado para o setor (nao e produto do catalogo), ou caminho em que so o nome chega e o
+    servidor prefere mandar null a mandar a categoria errada. Nesses casos o item cai no grupo
+    sem cabecalho — nunca sai 'null'/'None' impresso no papel.
+    """
+    if not isinstance(item, dict): return ""
+    v = item.get("category_name")
+    if v in (None, ""): v = item.get("categoria")
+    if v in (None, ""): return ""
+    s = str(v).strip()
+    # Blindagem: servidor mandando a string "null"/"None" nao pode virar cabecalho
+    return "" if s.lower() in ("null", "none", "undefined", "nan") else s
+
+def _agrupar_por_categoria(content):
+    """True quando o pedido pede os itens agrupados por categoria, com cabecalho.
+
+    REGRA DURA: a decisao e do SERVIDOR (flag print_item_category, opt-in por loja em
+    Configuracoes > Impressao), NUNCA do agente. Nao se infere nada da presenca de
+    category_name nos itens: sem a flag em true o cupom tem que sair byte a byte igual ao de
+    antes, porque as outras lojas nao pediram essa mudanca e nao podem ver o cupom mudar.
+
+    E FLAG POR JOB, NAO CONFIGURACAO DO AGENTE — nunca cacheie em cfg. Numa rede a matriz
+    concentra os jobs das filiais, e o servidor resolve a flag pela LOJA QUE FEZ O PEDIDO:
+    dois jobs da MESMA leva podem vir com flags diferentes e cada cupom tem que respeitar a
+    sua. Por isso e lida do content a cada _fmt, e de lugar nenhum mais.
+
+    Nivel do pedido/content, nos 3 shapes que o servidor usa (contrato de 31/07):
+      content.print_item_category ....... agent-unified-poll / agent-get-order (raiz)
+      content.pedido.print_item_category  agent-jobs
+      content.order.print_item_category . print-agent-poll
+    """
+    if not isinstance(content, dict): return False
+    v = content.get("print_item_category")
+    if v is None:
+        for _k in ("pedido", "order"):
+            _sub = content.get(_k)
+            if isinstance(_sub, dict) and _sub.get("print_item_category") is not None:
+                v = _sub.get("print_item_category"); break
+    if isinstance(v, bool): return v
+    # Tolera a flag chegando como texto/numero (JSON de terceiros). Cuidado deliberado: so
+    # liga em valores explicitamente verdadeiros — "false"/"0"/lixo desliga.
+    if isinstance(v, str): return v.strip().lower() in ("true", "1", "t", "sim", "yes", "y")
+    if isinstance(v, (int, float)): return int(v) == 1
+    return False
+
+def _grupos_por_categoria(itens, ativo):
+    """Agrupa os itens por categoria e devolve [(nome_categoria, [itens]), ...].
+    Categoria '' = grupo SEM cabecalho.
+
+    - ativo=False (flag desligada): um unico grupo '' com TODOS os itens na ordem original —
+      o cupom sai identico ao formato atual.
+    - Ordem dos grupos = PRIMEIRA APARICAO da categoria no pedido, nao alfabetica: o lojista
+      espera o cupom na ordem em que os itens entraram.
+    - Itens sem categoria formam o grupo '' na posicao em que apareceram — nao vao para o fim
+      e nao inventam um "OUTROS".
+    - Se NENHUM item tem categoria, sai um unico grupo '' e nenhum cabecalho e impresso.
+    """
+    itens = itens if isinstance(itens, list) else []
+    if not ativo:
+        return [("", itens)]
+    grupos = {}   # chave normalizada -> [itens]
+    nomes  = {}   # chave normalizada -> nome como apareceu 1a vez (o que vai no papel)
+    ordem  = []   # chaves na ordem de primeira aparicao
+    for item in itens:
+        cat = _categoria_do_item(item)
+        # Chave em minusculas: 'Bebidas' e 'bebidas' sao a MESMA categoria e nao podem gerar
+        # dois cabecalhos. O nome impresso e o da primeira aparicao.
+        k = cat.lower()
+        if k not in grupos:
+            grupos[k] = []; nomes[k] = cat; ordem.append(k)
+        grupos[k].append(item)
+    return [(nomes[k], grupos[k]) for k in ordem]
+
+def _cab_categoria(cat, w):
+    """Linhas do cabecalho de um grupo: nome da categoria em CAIXA ALTA, centralizado na
+    largura do papel, em negrito, entre tracinhos:
+        ------------- MARMITEX MEDIA -------------
+    Categoria '' devolve [] — grupo sem categoria sai sem cabecalho.
+
+    O NOME VENCE OS TRACINHOS: se nao couber com eles, os tracinhos saem de cena; se nem
+    assim couber, o nome quebra em varias linhas. Cortar o nome derrota o proposito do
+    cabecalho (era exatamente o nome que faltava para desambiguar o produto).
+
+    Negrito por ESC/POS INLINE (ESC E 1 / ESC E 0), o mesmo jeito que _linha_pai usa para a
+    fonte B: nao mexe no alinhamento (a linha ja tem a largura exata w e nao pode ser
+    recentralizada pela impressora) e nao depende do sistema de marcadores [[...]] — assim
+    este cabecalho funciona nos dois caminhos de _fmt (string e bytes) sem caso especial.
+    """
+    nome = _txt(str(cat or "")).strip().upper()
+    if not nome:
+        return []
+    folga = w - len(nome) - 2  # 2 = os espacos que separam o nome dos tracinhos
+    if folga >= 2:
+        esq = folga // 2
+        linhas = ["-" * esq + " " + nome + " " + "-" * (folga - esq)]
+    else:
+        # Nome grande demais para os tracinhos: imprime so o nome, quebrado em PALAVRAS e
+        # centralizado por espacos. Quebra propria (nao _wrap_linhas) para este cabecalho nao
+        # depender do modulo do cupom fiscal: e uma linha curta, sem \n, entao o caso e simples.
+        linhas, atual = [], ""
+        for palavra in nome.split():
+            while len(palavra) > w:                     # palavra maior que o papel: fatia
+                if atual: linhas.append(atual); atual = ""
+                linhas.append(palavra[:w]); palavra = palavra[w:]
+            cand = palavra if not atual else atual + " " + palavra
+            if len(cand) <= w: atual = cand
+            else: linhas.append(atual); atual = palavra
+        if atual: linhas.append(atual)
+        linhas = [l.center(w) for l in (linhas or [nome])]
+    return [f"\x1b\x45\x01{l}\x1b\x45\x00" for l in linhas]
+
 # Rotulos dos setores no sufixo de roteamento dos adicionais
 SL={"bar":"Bar","kitchen":"Cozinha","cozinha":"Cozinha","copa":"Copa","receipt":"Caixa","caixa":"Caixa"}
 
@@ -1038,11 +1172,15 @@ def _fmt(content, jt, pt):
     # Acentos compostos (NFC) antes de qualquer medicao de coluna: se o nome vier decomposto
     # ('a'+acento separados), len() conta 2 e a coluna de preco desalinha.
     content = _norm(content)
-    _pedido = content.get("pedido")
-    if isinstance(_pedido, dict):
-        _merged = dict(_pedido)
-        _merged.update(content)  # content por cima — mantem tudo que ja veio no nivel de fora
-        content = _merged
+    # Desembrulha o pedido aninhado qualquer que seja o nome da chave: 'pedido' (agent-jobs) ou
+    # 'order' (print-agent-poll). Sem isto o shape do print-agent-poll sairia com os itens mas
+    # sem numero do pedido, cliente e totais — todos eles estao um nivel abaixo.
+    for _chave_ninho in ("pedido", "order"):
+        _ninho = content.get(_chave_ninho)
+        if isinstance(_ninho, dict):
+            _merged = dict(_ninho)
+            _merged.update(content)  # content por cima — mantem tudo que ja veio no nivel de fora
+            content = _merged
     # Largura do papel: paper_width do content tem prioridade, default 48
     pw = content.get("paper_width")
     w = int(pw) if pw and str(pw).isdigit() else W
@@ -1061,6 +1199,9 @@ def _fmt(content, jt, pt):
     # Flags de exibição configuráveis
     show_phone    = content.get("print_customer_info", True)
     show_payment  = content.get("print_payment_method", True)
+    # Agrupar itens por categoria com cabecalho — opt-in por loja, decidido pelo SERVIDOR.
+    # Desligado (o normal) = cupom identico ao de antes.
+    _agrupar_cat  = _agrupar_por_categoria(content)
 
     tipo=content.get("type",jt); ll=[]
     # Normaliza tipos de salao/mesa para o layout receipt
@@ -1092,18 +1233,20 @@ def _fmt(content, jt, pt):
         if ph and show_phone: ll.append(f"Tel: {ph}")
         ll.append(S)
         DP="·"*w
-        for item in _itens_do_content(content):
-            size=_size_do_item(item)
-            ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
-            ll += _linha_pai(item)
-            for a in _adicionais_do_item(item):
-                if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
-                pc=a.get("preco_cents",0)
-                # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
-                ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
-            obs=_obs_do_item(item)
-            if obs: ll.append(f"  >> {obs}")
-            ll.append(DP)
+        for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
+            ll += _cab_categoria(_cat, w)
+            for item in _itens_cat:
+                size=_size_do_item(item)
+                ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
+                ll += _linha_pai(item)
+                for a in _adicionais_do_item(item):
+                    if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
+                    pc=a.get("preco_cents",0)
+                    # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
+                    ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
+                obs=_obs_do_item(item)
+                if obs: ll.append(f"  >> {obs}")
+                ll.append(DP)
         ll.append(S)
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         ent=content.get("delivery_fee_cents",0); tot=content.get("total_cents",0)
@@ -1156,16 +1299,20 @@ def _fmt(content, jt, pt):
             ll += cab
             DP="·"*w
             itens=_itens_do_content(content)
-            for item in itens:
-                size=_size_do_item(item)
-                q=_qtd_do_item(item); ll.append(f"[ {q}x ]  {_nome_com_tamanho(item)}")
-                ll += _linha_pai(item)
-                for a in _adicionais_do_item(item):
-                    if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
-                    ll.append(f"  + {a.get('nome','')}{_rota_sufixo(a)}")
-                obs=_obs_do_item(item)
-                if obs: ll.append(f"  >> {obs}")
-                ll.append(DP)
+            # Na comanda o tamanho errado vira PRATO errado: o cabecalho de categoria e ainda
+            # mais critico aqui do que no cupom do caixa.
+            for _cat, _itens_cat in _grupos_por_categoria(itens, _agrupar_cat):
+                ll += _cab_categoria(_cat, w)
+                for item in _itens_cat:
+                    size=_size_do_item(item)
+                    q=_qtd_do_item(item); ll.append(f"[ {q}x ]  {_nome_com_tamanho(item)}")
+                    ll += _linha_pai(item)
+                    for a in _adicionais_do_item(item):
+                        if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
+                        ll.append(f"  + {a.get('nome','')}{_rota_sufixo(a)}")
+                    obs=_obs_do_item(item)
+                    if obs: ll.append(f"  >> {obs}")
+                    ll.append(DP)
             # Um setor pode receber comanda sem item proprio (ex: bar so com bebida de combo)
             if not itens: ll.append("  (sem itens para este setor)"); ll.append(DP)
             obs2=content.get("notes","")
@@ -1188,20 +1335,25 @@ def _fmt(content, jt, pt):
                 else:
                     parts.append(enc(linha))
             itens=_itens_do_content(content)
-            for item in itens:
-                q=_qtd_do_item(item)
-                size=_size_do_item(item)
-                nome=_nome_com_tamanho(item)
-                parts.append(FBIG)
-                parts.append(enc(f"[ {q}x ]  {nome}"))
-                parts.append(FNORMAL)
-                for linha in _linha_pai(item): parts.append(enc(linha))
-                for a in _adicionais_do_item(item):
-                    if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
-                    parts.append(enc(f"  + {a.get('nome','')}{_rota_sufixo(a)}"))
-                obs=_obs_do_item(item)
-                if obs: parts.append(enc(f"  >> {obs}"))
-                parts.append(enc(DP_str))
+            # Cabecalho de categoria em fonte NORMAL (como o resto do cab): em fonte grande a
+            # linha de largura w estouraria o papel e quebraria em duas.
+            for _cat, _itens_cat in _grupos_por_categoria(itens, _agrupar_cat):
+                for linha in _cab_categoria(_cat, w):
+                    parts.append(enc(linha))   # negrito ja vem inline na string
+                for item in _itens_cat:
+                    q=_qtd_do_item(item)
+                    size=_size_do_item(item)
+                    nome=_nome_com_tamanho(item)
+                    parts.append(FBIG)
+                    parts.append(enc(f"[ {q}x ]  {nome}"))
+                    parts.append(FNORMAL)
+                    for linha in _linha_pai(item): parts.append(enc(linha))
+                    for a in _adicionais_do_item(item):
+                        if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
+                        parts.append(enc(f"  + {a.get('nome','')}{_rota_sufixo(a)}"))
+                    obs=_obs_do_item(item)
+                    if obs: parts.append(enc(f"  >> {obs}"))
+                    parts.append(enc(DP_str))
             # Um setor pode receber comanda sem item proprio (ex: bar so com bebida de combo)
             if not itens:
                 parts.append(enc("  (sem itens para este setor)")); parts.append(enc(DP_str))
@@ -1233,18 +1385,20 @@ def _fmt(content, jt, pt):
         if cod: ll.append(f"Codigo: {cod}".center(w))
         ll.append(S)
         DP="·"*w
-        for item in _itens_do_content(content):
-            size=_size_do_item(item)
-            ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
-            ll += _linha_pai(item)
-            for a in _adicionais_do_item(item):
-                if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
-                pc=a.get("preco_cents",0)
-                # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
-                ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
-            obs=_obs_do_item(item)
-            if obs: ll.append(f"  >> {obs}")
-            ll.append(DP)
+        for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
+            ll += _cab_categoria(_cat, w)
+            for item in _itens_cat:
+                size=_size_do_item(item)
+                ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
+                ll += _linha_pai(item)
+                for a in _adicionais_do_item(item):
+                    if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
+                    pc=a.get("preco_cents",0)
+                    # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
+                    ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
+                obs=_obs_do_item(item)
+                if obs: ll.append(f"  >> {obs}")
+                ll.append(DP)
         ll.append(S)
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         tot=content.get("total_cents",0)
@@ -1276,18 +1430,20 @@ def _fmt(content, jt, pt):
         if t2 and show_phone: ll.append(f"Tel: {t2}")
         ll.append(S)
         DP="·"*w
-        for item in _itens_do_content(content):
-            size=_size_do_item(item)
-            ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
-            ll += _linha_pai(item)
-            for a in _adicionais_do_item(item):
-                if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
-                pc=a.get("preco_cents",0)
-                # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
-                ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
-            obs=_obs_do_item(item)
-            if obs: ll.append(f"  >> {obs}")
-            ll.append(DP)
+        for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
+            ll += _cab_categoria(_cat, w)
+            for item in _itens_cat:
+                size=_size_do_item(item)
+                ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
+                ll += _linha_pai(item)
+                for a in _adicionais_do_item(item):
+                    if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
+                    pc=a.get("preco_cents",0)
+                    # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
+                    ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
+                obs=_obs_do_item(item)
+                if obs: ll.append(f"  >> {obs}")
+                ll.append(DP)
         ll.append(S)
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         ent=content.get("delivery_fee_cents",0); tot=content.get("total_cents",0)
@@ -1409,7 +1565,12 @@ def proc_job(job):
     if oid and not _content_rico:
         p=ef_get_order(oid)
         if p:
+            # O refetch TROCA o content inteiro: se o pedido buscado nao trouxer a flag, o cupom
+            # da loja que a ligou perderia os cabecalhos. Preserva o que o job trouxe.
+            _agrup_orig = _agrupar_por_categoria(content)
             content=p
+            if _agrup_orig and not _agrupar_por_categoria(content):
+                content["print_item_category"] = True
             if "order_items" in content and "items" not in content:
                 raw_items = content.get("order_items") or []
                 content["items"] = [
@@ -1420,6 +1581,8 @@ def proc_job(job):
                         "unit_price_cents": it.get("price_cents_snapshot") or it.get("unit_price_cents",0),
                         "notes": it.get("notes",""),
                         "addons": it.get("addons_json") or it.get("addons",[]),
+                        # Sem isto o remapeamento descartaria a categoria e o cabecalho nao sairia
+                        "category_name": it.get("category_name") or it.get("categoria") or "",
                     }
                     for it in raw_items
                 ]
@@ -1467,6 +1630,10 @@ def proc_job(job):
     # PRIORIDADE: dados formatados do servidor (ESC/POS RAW) se existirem.
     # Se o job foi absorvido como cupom (_forcar_cupom), IGNORA o escpos_data (seria a comanda ja
     # renderizada) e reformatamos via _fmt para sair como cupom.
+    # AGRUPAMENTO POR CATEGORIA — NUNCA NOS DOIS: o escpos_data ja vem agrupado pelo servidor.
+    # Os dois caminhos abaixo sao MUTUAMENTE EXCLUSIVOS (RAW vence; _fmt so roda se dados is
+    # None), e e _fmt quem agrupa. Ao mexer aqui, mantenha a exclusao: se um dia o RAW virar
+    # base para o _fmt complementar, o cabecalho de categoria sairia DUAS vezes no mesmo papel.
     escpos_b64 = None if _forcar_cupom else job.get("escpos_data")
     dados = None  # conteudo final (bytes RAW ou str de texto)
     if escpos_b64:
@@ -2254,7 +2421,9 @@ def abrir_dashboard():
                     resp["items"] = [{"name": it.get("name_snapshot") or it.get("product_name") or it.get("name",""),
                                       "size_name": it.get("size_name","") or it.get("tamanho",""),
                                       "quantity": it.get("quantity",1), "unit_price_cents": it.get("price_cents_snapshot") or it.get("unit_price_cents",0),
-                                      "notes": it.get("notes",""), "addons": it.get("addons_json") or it.get("addons",[])} for it in raw_items]
+                                      "notes": it.get("notes",""), "addons": it.get("addons_json") or it.get("addons",[]),
+                                      # Categoria tambem na reimpressao: o papel tem que sair igual ao original
+                                      "category_name": it.get("category_name") or it.get("categoria") or ""} for it in raw_items]
                 imp = _res_imp_por_rede(pt_orig); pt_uso = pt_orig
                 log.info(f"[REIMP] Impressora para tipo '{pt_orig}': {imp}")
                 if not imp:
