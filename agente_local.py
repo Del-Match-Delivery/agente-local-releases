@@ -620,24 +620,40 @@ _ESCPOS_BIG_OFF = b"\x1d\x21\x00\x1b\x45\x00\x1b\x61\x00"  # normal + bold off +
 _MARCADOR_ON_PLACEHOLDER  = "\x01\x02BIG_ON\x02\x01"   # bytes de controle improváveis em texto real
 _MARCADOR_OFF_PLACEHOLDER = "\x01\x02BIG_OFF\x02\x01"
 
+# Negrito centralizado em tamanho NORMAL. Usado pelo aviso "NAO E DOCUMENTO FISCAL", que
+# precisa ser destacado mas NAO pode dobrar de tamanho (o [[BIG_ORDER_*]] e 2x2 e estouraria
+# a largura do papel de 58 mm).
+_ESCPOS_NEG_ON  = b"\x1b\x61\x01\x1b\x45\x01"              # center + bold on
+_ESCPOS_NEG_OFF = b"\x1b\x45\x00\x1b\x61\x00"              # bold off + left
+_MARCADOR_NEG_ON_PLACEHOLDER  = "\x01\x02NEG_ON\x02\x01"
+_MARCADOR_NEG_OFF_PLACEHOLDER = "\x01\x02NEG_OFF\x02\x01"
+
+def _tem_marcador(texto):
+    """True se a linha tem marcador ESC/POS que precisa virar bytes crus."""
+    return isinstance(texto, str) and ("[[BIG_ORDER_ON]]" in texto or "[[NEG_ON]]" in texto)
+
 def _substituir_marcadores_escpos(texto):
-    """Substitui marcadores '[[BIG_ORDER_ON]]' e '[[BIG_ORDER_OFF]]' por bytes ESC/POS reais.
+    """Substitui marcadores '[[BIG_ORDER_ON/OFF]]' e '[[NEG_ON/OFF]]' por bytes ESC/POS reais.
     Otimizado: usa placeholders com bytes de controle raros, encoda em bloco (cp850),
     e substitui por bytes crus depois. Se nao houver marcador, retorna direto o encode.
     """
     if not isinstance(texto, str):
         # Blindagem: se por algum motivo veio None/bytes/outro tipo, converte
         texto = str(texto) if texto is not None else ""
-    if "[[BIG_ORDER_ON]]" not in texto:
+    if not _tem_marcador(texto):
         # Caminho rapido: sem marcador, encode direto em bloco
         return _enc(_txt(texto))
     # Substitui marcadores por placeholders que sobrevivem ao encode
     texto = texto.replace("[[BIG_ORDER_ON]]",  _MARCADOR_ON_PLACEHOLDER)
     texto = texto.replace("[[BIG_ORDER_OFF]]", _MARCADOR_OFF_PLACEHOLDER)
+    texto = texto.replace("[[NEG_ON]]",  _MARCADOR_NEG_ON_PLACEHOLDER)
+    texto = texto.replace("[[NEG_OFF]]", _MARCADOR_NEG_OFF_PLACEHOLDER)
     dados = _enc(_txt(texto))
     # Troca placeholders pelos bytes ESC/POS (placeholders sao ASCII: _enc nao os altera)
     dados = dados.replace(_enc(_MARCADOR_ON_PLACEHOLDER),  _ESCPOS_BIG_ON)
     dados = dados.replace(_enc(_MARCADOR_OFF_PLACEHOLDER), _ESCPOS_BIG_OFF)
+    dados = dados.replace(_enc(_MARCADOR_NEG_ON_PLACEHOLDER),  _ESCPOS_NEG_ON)
+    dados = dados.replace(_enc(_MARCADOR_NEG_OFF_PLACEHOLDER), _ESCPOS_NEG_OFF)
     return dados
 
 def _imprimir_raw(nome, conteudo):
@@ -986,6 +1002,77 @@ def _agrupar_por_categoria(content):
     if isinstance(v, (int, float)): return int(v) == 1
     return False
 
+# ---------------------------------------------------------------------------
+# Rede multi-loja: de QUAL LOJA e este job
+# ---------------------------------------------------------------------------
+# Numa rede a matriz concentra a impressao das filiais (print_target_restaurant_id).
+# O job sempre soube a origem (print_jobs.restaurant_id), mas o polling nunca devolveu
+# essa coluna — o agente so recebe o content. Por isso o servidor carimba a origem
+# DENTRO do content, na trigger set_print_job_target (contrato de 01/08/2026):
+#
+#   store_name ......... nome da loja que FEZ o pedido
+#   print_store_label .. true quando a origem NAO e quem imprime (filial no concentrador)
+#
+# Antes disso o cabecalho caia em cfg["restaurant_name"] — o nome da MATRIZ — e o
+# cupom da filial saia com a loja errada; a comanda nao dizia nada sobre a loja.
+
+def _loja_do_job(content):
+    """Nome da loja que FEZ o pedido. '' quando o servidor nao carimbou (job antigo).
+
+    Lido do CONTENT a cada impressao e de lugar nenhum mais. Nunca de cfg: cfg guarda a
+    loja PAREADA com o agente (a matriz), e numa mesma leva chegam jobs de lojas
+    diferentes — cachear aqui carimbaria a loja errada no cupom da filial seguinte.
+
+    Nos 3 shapes que o servidor usa, igual ao print_item_category:
+      content.store_name .......... agent-unified-poll / agent-get-order (raiz)
+      content.pedido.store_name ... agent-jobs
+      content.order.store_name .... print-agent-poll
+    """
+    if not isinstance(content, dict): return ""
+    v = content.get("store_name")
+    if v in (None, ""):
+        for _k in ("pedido", "order"):
+            _sub = content.get(_k)
+            if isinstance(_sub, dict) and _sub.get("store_name"):
+                v = _sub.get("store_name"); break
+    if v in (None, ""): return ""
+    s = str(v).strip()
+    # Blindagem: servidor mandando "null"/"None" nao pode virar nome de loja no papel
+    return "" if s.lower() in ("null", "none", "undefined", "nan") else s
+
+def _selo_loja_ativo(content):
+    """True quando o cupom/comanda deve estampar 'LOJA: X'.
+
+    REGRA DURA: a decisao e do SERVIDOR (print_store_label), NUNCA do agente. Nao se
+    infere nada da presenca de store_name: loja unica recebe o campo tambem e o cupom
+    dela tem que sair byte a byte igual ao de antes. So filial imprimindo no
+    concentrador ganha o selo. Mesmos 3 shapes e mesma tolerancia de tipo do
+    print_item_category (JSON de terceiros manda bool como texto)."""
+    if not isinstance(content, dict): return False
+    v = content.get("print_store_label")
+    if v is None:
+        for _k in ("pedido", "order"):
+            _sub = content.get(_k)
+            if isinstance(_sub, dict) and _sub.get("print_store_label") is not None:
+                v = _sub.get("print_store_label"); break
+    if isinstance(v, bool): return v
+    if isinstance(v, str): return v.strip().lower() in ("true", "1", "t", "sim", "yes", "y")
+    if isinstance(v, (int, float)): return int(v) == 1
+    return False
+
+def _linhas_selo_loja(content, w):
+    """Linhas do selo 'LOJA: X' em negrito centralizado, ou [] quando nao se aplica.
+
+    Negrito de tamanho NORMAL ([[NEG_ON]]), nao [[BIG_ORDER_ON]]: este ultimo e 2x2 e
+    estouraria o papel de 58 mm — e nome de loja e bem mais longo que um numero de pedido.
+    Nome comprido QUEBRA em varias linhas em vez de truncar: em 'Droga Ven LJ24 - AV.
+    MARIA ANTONIA CAMARGO DE OLIVEIRA' (80+ colunas) o corte esconderia justamente o
+    trecho que diferencia uma loja da outra, que e o motivo do selo existir."""
+    if not _selo_loja_ativo(content): return []
+    nome = _loja_do_job(content)
+    if not nome: return []
+    return [f"[[NEG_ON]]{linha}[[NEG_OFF]]" for linha in _wrap_linhas(f"LOJA: {nome.upper()}", w)]
+
 def _grupos_por_categoria(itens, ativo):
     """Agrupa os itens por categoria e devolve [(nome_categoria, [itens]), ...].
     Categoria '' = grupo SEM cabecalho.
@@ -1164,6 +1251,300 @@ def _bloco_endereco(content, w, titulo="ENTREGA:"):
         return []
     return [S, titulo.center(w)] + linhas
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# NFC-e — DANFE (Documento Auxiliar da NFC-e)
+#
+# O cupom fiscal e um DOCUMENTO DIFERENTE do cupom do pedido, e tudo o que sai nele vem do
+# XML AUTORIZADO PELA SEFAZ (bloco content.fiscal) — nada do pedido, nada de printer_settings.
+# Se essa regra for violada, o lojista entrega um documento invalido ao cliente.
+#
+# Sem XML nao existe DANFE: o bloco NUNCA e montado a partir do pedido, em nenhuma hipotese.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Tipos de job que sao CUPOM DE CLIENTE (cabecalho + rodape do lojista), nunca comanda de
+# setor. Lista EXPLICITA de proposito: classificar por exclusao ("se nao e order nem receipt,
+# entao e setor") fazia o cupom fiscal sair como ticket de cozinha, sem o bloco fiscal.
+# AO CRIAR UM job_type NOVO QUE SEJA CUPOM DE CLIENTE, ELE PRECISA ENTRAR AQUI.
+TIPOS_CUPOM_CLIENTE = {"order", "receipt", "fiscal", "danfce", "pickup", "delivery"}
+TIPOS_CUPOM_FISCAL  = {"fiscal", "danfce"}
+
+# Ajuste SINIEF 32/24, em vigor desde 01/02/2025: todo impresso entregue ao consumidor que
+# NAO seja documento fiscal precisa dizer isso. Sem esse aviso o cliente leva um papel com
+# itens e total achando que recebeu nota.
+AVISO_NAO_FISCAL = "[[NEG_ON]]NÃO É DOCUMENTO FISCAL[[NEG_OFF]]"
+
+def _escpos_qr(dados, modulo=5):
+    """QR Code pelo comando NATIVO da impressora (GS ( k) — nao bitmap: imprime mais rapido e
+    sai nitido em qualquer resolucao. Nivel de correcao de erro M (0x32), exigido pela
+    especificacao da NFC-e (em L o leitor falha em papel manchado/desbotado).
+
+    O conteudo vai em bytes crus, SEM passar pelo codepage da impressora: o payload do QR nao
+    e texto para imprimir, e dado do simbolo. Modelos antigos sem QR nativo ignoram o comando
+    e imprimem o resto do cupom — a chave de acesso continua legivel em texto (Divisao IV).
+    """
+    d = str(dados or "").encode("utf-8", "ignore")
+    if not d:
+        return b""
+    if len(d) > 7089:  # capacidade maxima do modelo 2
+        d = d[:7089]
+    n = len(d) + 3
+    return (b"\x1d\x28\x6b\x04\x00\x31\x41\x32\x00"                                  # modelo 2
+            + b"\x1d\x28\x6b\x03\x00\x31\x43" + bytes([max(1, min(16, int(modulo)))])  # tamanho do modulo
+            + b"\x1d\x28\x6b\x03\x00\x31\x45\x32"                                    # correcao de erro M
+            + b"\x1d\x28\x6b" + bytes([n & 0xff, (n >> 8) & 0xff]) + b"\x31\x50\x30" + d  # dados
+            + b"\x1d\x28\x6b\x03\x00\x31\x51\x30")                                   # imprime
+
+def _fv(v):
+    """Valor que veio do XML: usa como esta. Ja chega em pt-BR e com documento mascarado —
+    o agente NAO formata e NAO recalcula nada. None/ausente vira '' para ser OMITIDO."""
+    if v is None:
+        return ""
+    return str(v).strip()
+
+def _wrap_linhas(texto, w, indent=""):
+    """Quebra texto em linhas de no maximo w colunas sem cortar palavra no meio. Palavra maior
+    que a largura e fatiada (URL de consulta, descricao de produto sem espaco).
+    Truncar nao e opcao aqui: campo do DANFE cortado no meio e documento errado."""
+    if texto is None:
+        return []
+    largura = max(8, w - len(indent))
+    out = []
+    for bruto in str(texto).split("\n"):
+        palavras = bruto.split()
+        if not palavras:
+            continue
+        atual = ""
+        for palavra in palavras:
+            while len(palavra) > largura:
+                if atual:
+                    out.append(indent + atual); atual = ""
+                out.append(indent + palavra[:largura]); palavra = palavra[largura:]
+            cand = palavra if not atual else atual + " " + palavra
+            if len(cand) <= largura:
+                atual = cand
+            else:
+                out.append(indent + atual); atual = palavra
+        if atual:
+            out.append(indent + atual)
+    return out
+
+def _par(esq, dir_, w):
+    """Rotulo a esquerda, valor alinhado a direita, dentro de w colunas. Se nao couber na mesma
+    linha, o valor desce para a linha seguinte alinhado a direita — nunca abrevia o rotulo
+    (os rotulos da Divisao III sao literais e nao podem ser encurtados)."""
+    esq = str(esq); dir_ = str(dir_)
+    espaco = w - len(esq) - len(dir_)
+    if espaco < 1:
+        return [esq, dir_.rjust(w)]
+    return [esq + " " * espaco + dir_]
+
+def _cupom_fiscal_bytes(content, fiscal, w):
+    """Desenha o cupom fiscal (DANFE) nas divisoes I a IX, na ordem NORMATIVA, e devolve os
+    bytes ESC/POS prontos para a impressora.
+
+    REGRAS QUE NAO SAO ESTETICA:
+      - Rotulos sao LITERAIS: "Qtde. Total de Itens", "Valor Total R$", "Valor a Pagar R$",
+        "Forma de Pagamento", "Valor Pago", "Troco" e a frase de consulta nao se abreviam
+        nem se traduzem.
+      - Campo obrigatorio ausente e OMITIDO, nunca inventado: serie nula nao vira "001", a
+        linha sai fora. Cupom declarando serie diferente da transmitida e documento errado.
+      - Contingencia imprime o aviso em DOIS lugares (apos a Divisao I e apos a VII) e
+        SUPRIME o protocolo — a nota ainda nao foi autorizada.
+      - Troco, forma de pagamento e valor pago sao obrigatorios na Divisao III: NENHUM toggle
+        de configuracao pode remover.
+      - Em delivery, nome do consumidor e endereco de entrega sao obrigatorios e NAO dependem
+        de print_customer_info.
+      - Fonte NORMAL sempre: o font_size que o lojista escolheu no agente nao vale aqui, senao
+        as colunas do documento fiscal desalinham.
+      - O corte nunca acontece antes do fim da Divisao IX nem sobre a zona de silencio do QR.
+    """
+    NORMAL  = b"\x1b\x21\x00"
+    CENTRO  = b"\x1b\x61\x01"
+    ESQUERDA = b"\x1b\x61\x00"
+    NEG_ON  = b"\x1b\x45\x01"
+    NEG_OFF = b"\x1b\x45\x00"
+    S = "-" * w
+
+    # ESC t primeiro: este caminho devolve bytes e vai direto pra impressora, sem passar pelo
+    # prefixo montado em _imprimir_raw/_imprimir_tcp. Sem isso "Consumidor Eletronica",
+    # "autorizacao" e "HOMOLOGACAO" saem com caractere de moldura no lugar do acento.
+    p = [_escpos_cp(), ESQUERDA, NORMAL]
+    ENC = lambda s: _enc(_txt(str(s)) + "\n")
+
+    def esq(linhas):
+        for l in linhas or []:
+            p.append(ENC(l))
+
+    def centro(linhas, negrito=False):
+        if not linhas:
+            return
+        p.append(CENTRO)
+        if negrito: p.append(NEG_ON)
+        for l in linhas:
+            p.append(ENC(l))
+        if negrito: p.append(NEG_OFF)
+        p.append(ESQUERDA)
+
+    # Aviso de contingencia — montado aqui porque sai em DOIS pontos (apos I e apos VII).
+    _cont = _fv(fiscal.get("contingencia")).lower()
+    if _cont == "offline":
+        aviso_cont = ["EMITIDA EM CONTINGÊNCIA OFF-LINE", "Pendente de autorização"]
+    elif _cont == "epec":
+        aviso_cont = ["EMITIDA EM CONTINGÊNCIA VIA EPEC", "Pendente de autorização"]
+    elif _cont:
+        aviso_cont = ["EMITIDA EM CONTINGÊNCIA", "Pendente de autorização"]
+    else:
+        aviso_cont = []
+
+    # ── Divisao I — emitente (do XML, NAO de printer_settings) ───────────────
+    centro(_wrap_linhas(_fv(fiscal.get("emitente_nome")), w), negrito=True)
+    doc = _fv(fiscal.get("emitente_documento"))
+    if doc:
+        centro([f"{'CNPJ' if '/' in doc else 'CPF'}: {doc}"])
+    ie = _fv(fiscal.get("emitente_ie"))
+    if ie:
+        centro([f"IE: {ie}"])
+    for linha in (fiscal.get("emitente_endereco") or []):
+        centro(_wrap_linhas(_fv(linha), w))
+    p.append(ENC(S))
+    centro(_wrap_linhas("Documento Auxiliar da Nota Fiscal de Consumidor Eletrônica", w))
+    if aviso_cont:
+        centro(aviso_cont, negrito=True)
+
+    # ── Divisao II — itens: os 6 campos sao obrigatorios e nunca somem ───────
+    p.append(ENC(S))
+    esq(["CÓDIGO  DESCRIÇÃO"])
+    esq(_par("QTDE UN  VL UNIT R$", "VL TOTAL R$", w))
+    p.append(ENC(S))
+    for it in (fiscal.get("itens") or []):
+        if not isinstance(it, dict):
+            continue
+        cod  = _fv(it.get("codigo"))
+        desc = _fv(it.get("descricao"))
+        esq(_wrap_linhas(f"{cod} {desc}".strip(), w))
+        qtd = _fv(it.get("quantidade"))
+        un  = _fv(it.get("unidade"))
+        vu  = _fv(it.get("valor_unitario"))
+        vt  = _fv(it.get("valor_total"))
+        esq(["  " + l for l in _par(f"{qtd} {un} x {vu}".strip(), vt, w - 2)])
+        vtrib = _fv(it.get("valor_tributos"))   # opcional
+        if vtrib:
+            esq(["  " + l for l in _par("Valor Tributos R$", vtrib, w - 2)])
+
+    # ── Divisao III — totais e pagamento ────────────────────────────────────
+    p.append(ENC(S))
+    qi = _fv(fiscal.get("qtde_itens"))          # itens DISTINTOS, nao a soma das quantidades
+    if qi: esq(_par("Qtde. Total de Itens", qi, w))
+    vtot = _fv(fiscal.get("valor_total"))
+    if vtot: esq(_par("Valor Total R$", vtot, w))
+    acr = _fv(fiscal.get("acrescimos_desconto"))  # null = omitir a linha
+    if acr: esq(_par("Acréscimos/Desconto R$", acr, w))
+    vpag = _fv(fiscal.get("valor_a_pagar"))
+    if vpag: esq(_par("Valor a Pagar R$", vpag, w))
+    pagamentos = [x for x in (fiscal.get("pagamentos") or []) if isinstance(x, dict)]
+    if pagamentos:
+        esq(_par("Forma de Pagamento", "Valor Pago R$", w))
+        for pg in pagamentos:
+            esq(_par(_fv(pg.get("forma")), _fv(pg.get("valor")), w))
+    troco = _fv(fiscal.get("troco"))            # obrigatorio quando existe
+    if troco: esq(_par("Troco R$", troco, w))
+
+    # ── Divisao IV — consulta pela chave de acesso ──────────────────────────
+    p.append(ENC(S))
+    centro(_wrap_linhas("Consulte pela Chave de Acesso em", w))
+    url = _fv(fiscal.get("url_chave"))
+    if url: centro(_wrap_linhas(url, w))
+    # chave_formatada vem em 11 blocos de 4: quebra nos espacos, sem partir bloco no meio
+    chave = _fv(fiscal.get("chave_formatada")) or _fv(fiscal.get("chave_acesso"))
+    if chave: centro(_wrap_linhas(chave, w))
+
+    # ── Divisao V — QR Code (centralizado) ──────────────────────────────────
+    qr = _fv(fiscal.get("qr_code_url"))
+    if qr:
+        p.append(b"\n")
+        p.append(CENTRO)
+        # Modulo 5 em bobina 80 mm, 4 em 58 mm — em 58 mm o modulo 5 corta o simbolo
+        p.append(_escpos_qr(qr, 4 if w <= 34 else 5))
+        p.append(b"\n")
+        p.append(ESQUERDA)
+
+    # ── Divisao VI — consumidor ─────────────────────────────────────────────
+    p.append(ENC(S))
+    cons = fiscal.get("consumidor") if isinstance(fiscal.get("consumidor"), dict) else {}
+    tipo_c = _fv(cons.get("tipo")).lower()
+    doc_c  = _fv(cons.get("documento"))
+    if tipo_c == "cpf" and doc_c:
+        esq(_wrap_linhas(f"CONSUMIDOR CPF: {doc_c}", w))
+    elif tipo_c == "cnpj" and doc_c:
+        esq(_wrap_linhas(f"CONSUMIDOR CNPJ: {doc_c}", w))
+    elif tipo_c in ("estrangeiro", "id_estrangeiro") and doc_c:
+        esq(_wrap_linhas(f"CONSUMIDOR Id. Estrangeiro: {doc_c}", w))
+    else:
+        esq(["CONSUMIDOR NÃO IDENTIFICADO"])
+    nome_c = _fv(cons.get("nome"))
+    if nome_c:
+        esq(_wrap_linhas(nome_c, w))
+    # Endereco de entrega: null fora de delivery. Em delivery e obrigatorio e NAO depende de
+    # print_customer_info — por isso nao ha nenhum toggle consultado aqui.
+    for l in (fiscal.get("entrega_endereco") or []):
+        esq(_wrap_linhas(_fv(l), w))
+
+    # ── Divisao VII — identificacao da nota ─────────────────────────────────
+    p.append(ENC(S))
+    ident = []
+    num = _fv(fiscal.get("numero"))
+    ser = _fv(fiscal.get("serie"))
+    if num: ident.append(f"NFC-e nº {num}")
+    if ser: ident.append(f"Série {ser}")   # serie nula: a linha sai fora, nao vira "001"
+    if ident:
+        centro(_wrap_linhas(" ".join(ident), w))
+    de = _fv(fiscal.get("data_emissao"))   # dhEmi da NOTA, em Brasilia
+    if de:
+        centro(_wrap_linhas(f"Emissão: {de}", w))
+    if aviso_cont:
+        # Contingencia SUPRIME o protocolo: a nota ainda nao foi autorizada
+        centro(aviso_cont, negrito=True)
+    else:
+        prot = _fv(fiscal.get("protocolo"))
+        if prot:
+            centro(_wrap_linhas(f"Protocolo de Autorização: {prot}", w))
+        da = _fv(fiscal.get("data_autorizacao"))
+        if da:
+            centro(_wrap_linhas(da, w))
+
+    # ── Divisao VIII — mensagem fiscal ──────────────────────────────────────
+    # homologacao vem do tpAmb do XML, SEM default: so avisa quando e explicitamente True.
+    # Em producao esse aviso NAO pode aparecer.
+    if fiscal.get("homologacao") is True:
+        p.append(ENC(S))
+        centro(["EMITIDA EM AMBIENTE DE HOMOLOGAÇÃO", "SEM VALOR FISCAL"], negrito=True)
+    iaf = _fv(fiscal.get("inf_ad_fisco"))
+    if iaf:
+        p.append(ENC(S))
+        esq(_wrap_linhas(iaf, w))
+
+    # ── Divisao IX — informacoes complementares ─────────────────────────────
+    icpl = _fv(fiscal.get("inf_cpl"))
+    vat  = _fv(fiscal.get("valor_aproximado_tributos"))
+    if icpl or vat:
+        p.append(ENC(S))
+        if icpl: esq(_wrap_linhas(icpl, w))
+        if vat:  esq(_par("Valor aproximado dos tributos R$", vat, w))
+
+    # ── Rodape do lojista — SO depois do fim da Divisao IX, nunca antes ─────
+    # A mensagem institucional ("Obrigado pela preferencia") e permitida, mas FORA das
+    # divisoes: dentro delas seria texto livre no meio do documento fiscal.
+    # E nesta area pos-DANFE que cabem, no futuro, QR proprio de avaliacao, saldo de
+    # fidelidade e cupom promocional.
+    rod = _fv(content.get("footer_message"))
+    if rod:
+        p.append(ENC(S))
+        centro(_wrap_linhas(rod, w))
+
+    p.append(NORMAL)
+    p.append(b"\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")  # avanco + corte (bem depois da Divisao IX)
+    return b"".join(p)
+
 def _fmt(content, jt, pt):
     # Se o servidor mandar content aninhado ({pedido: {...}}), desembrulha campos do pedido
     # para que o resto do codigo continue lendo do 'content' plano.
@@ -1205,16 +1586,35 @@ def _fmt(content, jt, pt):
 
     tipo=content.get("type",jt); ll=[]
     # Normaliza tipos de salao/mesa para o layout receipt
-    if tipo not in ("order","receipt","kitchen","bar","pickup","delivery","command","test_page"):
+    if tipo not in ("order","receipt","kitchen","bar","pickup","delivery","command","test_page",
+                    "fiscal","danfce"):
         tipo = "receipt"
-    if tipo in ("order","receipt"):
-        ne=content.get("company_name","") or cfg.get("restaurant_name","")
+
+    # CUPOM FISCAL (NFC-e): documento DIFERENTE do cupom do pedido. Sai por modulo proprio,
+    # justamente para nao se misturar com o cupom operacional, e tudo vem do XML autorizado.
+    # Basta o bloco fiscal chegar: um job com content.fiscal E cupom fiscal, qualquer que seja
+    # o 'type' que o servidor carimbou.
+    _fiscal = content.get("fiscal")
+    if isinstance(_fiscal, dict) and _fiscal:
+        return _cupom_fiscal_bytes(content, _fiscal, w)
+
+    if tipo in ("order","receipt","fiscal","danfce"):
+        # Ajuste SINIEF 32/24: cupom do pedido SEM NFC-e autorizada precisa avisar que nao e
+        # documento fiscal. Quando ha bloco fiscal o codigo nem chega aqui (retornou acima) —
+        # e la o aviso NAO aparece, porque ali o documento e fiscal.
+        ll.append(AVISO_NAO_FISCAL)
+        # store_name antes do cfg: numa rede, cfg e a MATRIZ, e o cupom da filial tem que
+        # sair com o nome de quem vendeu. company_name (razao social) segue tendo prioridade.
+        ne=content.get("company_name","") or _loja_do_job(content) or cfg.get("restaurant_name","")
         if ne: ll.append(ne.upper().center(w))
         e=content.get("company_address","")
         if e: ll.append(e.center(w))
         t=content.get("company_phone","")
         if t: ll.append(f"Tel: {t}".center(w))
         ll.append(S)
+        # Selo da loja: so em filial impressa no concentrador (servidor decide).
+        _selo=_linhas_selo_loja(content, w)
+        if _selo: ll += _selo + [S]
         n=content.get("numero","") or content.get("order_number","")
         if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
         data_brt=content.get("created_at_brt","")
@@ -1272,7 +1672,13 @@ def _fmt(content, jt, pt):
         titulo = "COZINHA" if tipo=="kitchen" else "BAR"
         # Cabecalho sempre em fonte normal para caber na largura do papel
         cab = []
+        # Ajuste SINIEF 32/24: comanda de setor NUNCA e documento fiscal — aviso no TOPO.
+        cab.append(AVISO_NAO_FISCAL)
         cab+=["*"*w, titulo.center(w), "*"*w]
+        # Selo da loja LOGO ABAIXO do titulo, antes do numero do pedido: na matriz que
+        # concentra as filiais, produzir o pedido da loja errada e o erro mais caro que
+        # existe aqui — quem esta na chapa tem que ler a loja antes de qualquer outra coisa.
+        cab += _linhas_selo_loja(content, w)
         n=content.get("numero","") or content.get("order_number","")
         if n: cab.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
         tp=content.get("order_type","")
@@ -1329,7 +1735,7 @@ def _fmt(content, jt, pt):
             parts = [_escpos_cp(), FNORMAL]
             enc = lambda s: _enc(_txt(s)+"\n")
             for linha in cab:
-                if "[[BIG_ORDER_ON]]" in linha:
+                if _tem_marcador(linha):
                     # Substitui marcadores por bytes ESC/POS reais
                     parts.append(_substituir_marcadores_escpos(linha + "\n"))
                 else:
@@ -1366,11 +1772,18 @@ def _fmt(content, jt, pt):
             parts.append(b"\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")  # avanço + corte
             return b"".join(parts)
     elif tipo=="pickup":
-        ne=content.get("company_name","") or cfg.get("restaurant_name","")
+        # Ajuste SINIEF 32/24: cupom sem NFC-e autorizada avisa que nao e documento fiscal
+        ll.append(AVISO_NAO_FISCAL)
+        # store_name antes do cfg: numa rede, cfg e a MATRIZ, e o cupom da filial tem que
+        # sair com o nome de quem vendeu. company_name (razao social) segue tendo prioridade.
+        ne=content.get("company_name","") or _loja_do_job(content) or cfg.get("restaurant_name","")
         if ne: ll.append(ne.upper().center(w))
         e=content.get("company_address","")
         if e: ll.append(e.center(w))
         ll.append(S)
+        # Selo da loja: so em filial impressa no concentrador (servidor decide).
+        _selo=_linhas_selo_loja(content, w)
+        if _selo: ll += _selo + [S]
         n=content.get("numero","") or content.get("order_number","")
         if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
         data_brt=content.get("created_at_brt","")
@@ -1413,11 +1826,18 @@ def _fmt(content, jt, pt):
         if obs2: ll.append(S); ll.append(f"Obs: {obs2}")
         ll.append(S)
     elif tipo=="delivery":
-        ne=content.get("company_name","") or cfg.get("restaurant_name","")
+        # Ajuste SINIEF 32/24: cupom sem NFC-e autorizada avisa que nao e documento fiscal
+        ll.append(AVISO_NAO_FISCAL)
+        # store_name antes do cfg: numa rede, cfg e a MATRIZ, e o cupom da filial tem que
+        # sair com o nome de quem vendeu. company_name (razao social) segue tendo prioridade.
+        ne=content.get("company_name","") or _loja_do_job(content) or cfg.get("restaurant_name","")
         if ne: ll.append(ne.upper().center(w))
         e=content.get("company_address","")
         if e: ll.append(e.center(w))
         ll.append(S)
+        # Selo da loja: so em filial impressa no concentrador (servidor decide).
+        _selo=_linhas_selo_loja(content, w)
+        if _selo: ll += _selo + [S]
         n=content.get("numero","") or content.get("order_number","")
         if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
         data_brt=content.get("created_at_brt","")
@@ -1483,8 +1903,11 @@ def _res_imp(pt):
 _TIPOS_KITCHEN = {"kitchen","bar"}
 
 def _areas_para_tipo(pt):
-    """Retorna lista de areas aceitas para um printer_type. Tipos desconhecidos → receipt/caixa."""
-    mapa = {"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"],"delivery":["delivery"],"pickup":["balcao","pickup"]}
+    """Retorna lista de areas aceitas para um printer_type. Tipos desconhecidos → receipt/caixa.
+    fiscal/danfce entram EXPLICITAMENTE apontando para a caixa: cupom fiscal e cupom de cliente
+    e vai para a impressora do CAIXA, nunca para um setor."""
+    mapa = {"receipt":["caixa","receipt"],"kitchen":["cozinha","kitchen"],"bar":["bar"],"delivery":["delivery"],"pickup":["balcao","pickup"],
+            "fiscal":["caixa","receipt"],"danfce":["caixa","receipt"]}
     if pt in mapa:
         return mapa[pt]
     return ["cozinha","kitchen","bar"] if pt in _TIPOS_KITCHEN else ["caixa","receipt"]
@@ -1528,6 +1951,20 @@ def proc_job(job):
                    or content.get("order_id","")[:8]) if content else ""
     _cliente_ref = (content.get("customer_name","") or _pedido_obj.get("customer_name","")) if content else ""
 
+    # CUPOM FISCAL: sem o bloco fiscal nao existe DANFE, e ele NUNCA e montado a partir do
+    # pedido. Se o servidor carimbou job_type fiscal e content.fiscal nao chegou (whitelist do
+    # endpoint de poll, tipico), o cupom fiscal NAO sai — mas tambem nao pode sair um segundo
+    # cupom comum, que o cliente levaria achando que e nota. Registra falha VISIVEL: esta
+    # classe de bug ja quebrou a impressao "sem erro em lugar nenhum".
+    if jt in TIPOS_CUPOM_FISCAL and not isinstance(content.get("fiscal"), dict):
+        msg = ("Job fiscal chegou SEM content.fiscal — bloco perdido no caminho "
+               "(whitelist do agent-unified-poll?). Cupom fiscal NAO impresso.")
+        log.error(f"[FISCAL] Job {jid}: {msg}")
+        ef_update_job(jid, "failed", msg)
+        _registrar_falha(jid, "fiscal_sem_bloco", msg,
+                         tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
+        return
+
     # CONTORNO (v5.59): impressora de caixa "absorve" jobs de cozinha/bar como CUPOM.
     # Caso de uso: o lojista quer que a impressora do caixa imprima TUDO como cupom completo
     # (precos/total/endereco), inclusive itens que o servidor carimbou como kitchen/bar
@@ -1536,8 +1973,10 @@ def proc_job(job):
     # Assim o job nao e ignorado, e roteado para a caixa e sai como cupom (nao comanda).
     # NAO dispara se o agente tiver impressora propria de cozinha/bar — nesse caso o job vai
     # normalmente para ela como comanda.
+    # Cupom fiscal NUNCA e absorvido: ele ja vem para a caixa e tem layout proprio.
     _forcar_cupom = False
-    if pt in ("kitchen","bar") and not _agente_cobre_tipo(pt) and _agente_cobre_tipo("receipt"):
+    if (pt in ("kitchen","bar") and jt not in TIPOS_CUPOM_FISCAL
+            and not _agente_cobre_tipo(pt) and _agente_cobre_tipo("receipt")):
         log.info(f"[PRINT] Job {jid} veio como '{pt}' e o agente so tem impressora de caixa "
                  f"— absorvendo como CUPOM (receipt)")
         pt = "receipt"
@@ -1554,21 +1993,31 @@ def proc_job(job):
     if not _agente_cobre_tipo(pt):
         log.info(f"[PRINT] Job {jid} tipo={pt} — sem impressora mapeada neste agente, ignorando (outro agente processa)")
         return
-    log.info(f"[PRINT] Job {jid} tipo={pt}")
+    log.info(f"[PRINT] Job {jid} tipo={pt} job_type={jt}"
+             + (" FISCAL" if isinstance(content.get("fiscal"), dict) else ""))
     oid=content.get("order_id") or content.get("id","") or _pedido_obj.get("order_id","") or _pedido_obj.get("id","")
     _content_rico = (
         ("items" in content and len(content.get("items") or []) > 0)
         or ("itens" in content and len(content.get("itens") or []) > 0)
         or (isinstance(content.get("pedido"), dict) and len(_itens_do_content(content)) > 0)
         or "paper_width" in content or "receipt_font_size" in content or "company_name" in content
+        # Bloco fiscal ja e conteudo suficiente: o DANFE nao precisa de nada do pedido, e um
+        # refetch aqui TROCA o content inteiro e levaria o bloco embora.
+        or isinstance(content.get("fiscal"), dict)
     )
     if oid and not _content_rico:
         p=ef_get_order(oid)
         if p:
-            # O refetch TROCA o content inteiro: se o pedido buscado nao trouxer a flag, o cupom
-            # da loja que a ligou perderia os cabecalhos. Preserva o que o job trouxe.
+            # Preserva o bloco fiscal: ef_get_order devolve o PEDIDO, que nao tem dado do XML.
+            # Sem isto o refetch apagaria o cupom fiscal e ele sairia como cupom comum.
+            _fiscal_orig = content.get("fiscal")
+            # Mesma armadilha com a flag de agrupar por categoria: o refetch TROCA o content
+            # inteiro, e se o pedido buscado nao trouxer a flag o cupom da loja que a ligou
+            # perderia os cabecalhos. Preserva o que o job trouxe.
             _agrup_orig = _agrupar_por_categoria(content)
             content=p
+            if isinstance(_fiscal_orig, dict):
+                content["fiscal"] = _fiscal_orig
             if _agrup_orig and not _agrupar_por_categoria(content):
                 content["print_item_category"] = True
             if "order_items" in content and "items" not in content:
@@ -1630,11 +2079,17 @@ def proc_job(job):
     # PRIORIDADE: dados formatados do servidor (ESC/POS RAW) se existirem.
     # Se o job foi absorvido como cupom (_forcar_cupom), IGNORA o escpos_data (seria a comanda ja
     # renderizada) e reformatamos via _fmt para sair como cupom.
+    # Cupom fiscal tambem IGNORA o escpos_data: quem garante as divisoes I a IX (rotulos
+    # literais, QR nativo, omissao de campo ausente) e o renderizador local. Se o servidor
+    # mandar RAW de cupom comum junto do bloco fiscal, o RAW venceria e o DANFE se perderia
+    # em silencio — o cliente levaria um cupom comum achando que era a nota.
+    #
     # AGRUPAMENTO POR CATEGORIA — NUNCA NOS DOIS: o escpos_data ja vem agrupado pelo servidor.
     # Os dois caminhos abaixo sao MUTUAMENTE EXCLUSIVOS (RAW vence; _fmt so roda se dados is
     # None), e e _fmt quem agrupa. Ao mexer aqui, mantenha a exclusao: se um dia o RAW virar
     # base para o _fmt complementar, o cabecalho de categoria sairia DUAS vezes no mesmo papel.
-    escpos_b64 = None if _forcar_cupom else job.get("escpos_data")
+    _tem_fiscal = isinstance(content.get("fiscal"), dict) and bool(content.get("fiscal"))
+    escpos_b64 = None if (_forcar_cupom or _tem_fiscal) else job.get("escpos_data")
     dados = None  # conteudo final (bytes RAW ou str de texto)
     if escpos_b64:
         import base64
@@ -1649,6 +2104,16 @@ def proc_job(job):
         try:
             dados=_fmt(content,jt,pt)
         except Exception as e:
+            # EXCECAO da regra acima: cupom fiscal nao tem "cupom minimo". Um papel com
+            # "PEDIDO #99" no lugar do DANFE seria entregue ao cliente como se fosse a nota.
+            # Melhor nao sair nada e a falha aparecer na aba Falhas do que sair documento errado.
+            if _tem_fiscal:
+                msg = f"Erro ao montar o DANFE: {str(e)[:200]}"
+                log.error(f"[FISCAL] Job {jid}: {msg} — cupom fiscal NAO impresso", exc_info=True)
+                ef_update_job(jid, "failed", msg)
+                _registrar_falha(jid, "erro_formatacao_fiscal", msg,
+                                 tipo=pt, pedido=_pedido_ref, cliente=_cliente_ref)
+                return
             log.error(f"[PRINT] Erro em _fmt para job {jid}: {e} — imprimindo cupom minimo", exc_info=True)
             _num = (content.get("numero","") if isinstance(content, dict) else "") or _pedido_ref or "?"
             _cli = _cliente_ref or ""
@@ -1761,7 +2226,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.74"
+CURRENT_VERSION = "5.75"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
