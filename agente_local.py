@@ -575,8 +575,14 @@ def _cp():
     return e if e in CP_TAB else "cp850"
 
 def _escpos_cp():
-    """Comando ESC t que poe a impressora no mesmo codepage em que o texto e codificado."""
-    return bytes([0x1b,0x74,CP_TAB[_cp()]])
+    """Comando ESC t que poe a impressora no mesmo codepage em que o texto e codificado.
+    Vem precedido de FS . (cancela modo Kanji/duplo-byte): varias impressoras termicas
+    clone (chips chineses genericos vendidos com firmware voltado ao mercado chines) ligam
+    esse modo por padrao de fabrica. Com ele ativo, QUALQUER byte >=0x80 (acento em cp850,
+    ou o separador '·'=0xFA) e pareado de 2 em 2 e desenhado como glifo CJK do proprio
+    firmware, ignorando por completo a tabela escolhida pelo ESC t. FS . e no-op inofensivo
+    em impressoras que ja nao usam esse modo, entao e seguro mandar sempre."""
+    return bytes([0x1c,0x2e]) + bytes([0x1b,0x74,CP_TAB[_cp()]])
 
 def _txt(s):
     """Normaliza texto pra impressao: compoe acentos (NFC) e troca o que nao existe no
@@ -1632,7 +1638,7 @@ def _fmt(content, jt, pt):
         ph=content.get("customer_phone","")
         if ph and show_phone: ll.append(f"Tel: {ph}")
         ll.append(S)
-        DP="·"*w
+        DP="."*w
         for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
             ll += _cab_categoria(_cat, w)
             for item in _itens_cat:
@@ -1703,7 +1709,7 @@ def _fmt(content, jt, pt):
         if _fs <= 0:
             # Fonte normal: comportamento original — tudo em string
             ll += cab
-            DP="·"*w
+            DP="."*w
             itens=_itens_do_content(content)
             # Na comanda o tamanho errado vira PRATO errado: o cabecalho de categoria e ainda
             # mais critico aqui do que no cupom do caixa.
@@ -1729,7 +1735,7 @@ def _fmt(content, jt, pt):
             # Cabecalho e detalhes (addons, obs) em normal; nome do item em grande.
             FNORMAL = b"\x1b\x21\x00"
             FBIG    = _escpos_font_prefix()
-            DP_str  = "·"*w
+            DP_str  = "."*w
             # ESC t primeiro: este caminho devolve bytes e vai direto pra impressora,
             # sem passar pelo prefixo montado em _imprimir_raw/_imprimir_tcp.
             parts = [_escpos_cp(), FNORMAL]
@@ -1797,7 +1803,7 @@ def _fmt(content, jt, pt):
         cod=content.get("pickup_code","")
         if cod: ll.append(f"Codigo: {cod}".center(w))
         ll.append(S)
-        DP="·"*w
+        DP="."*w
         for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
             ll += _cab_categoria(_cat, w)
             for item in _itens_cat:
@@ -1849,7 +1855,7 @@ def _fmt(content, jt, pt):
         t2=content.get("customer_phone","")
         if t2 and show_phone: ll.append(f"Tel: {t2}")
         ll.append(S)
-        DP="·"*w
+        DP="."*w
         for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
             ll += _cab_categoria(_cat, w)
             for item in _itens_cat:
@@ -2226,7 +2232,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.75"
+CURRENT_VERSION = "5.76"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
