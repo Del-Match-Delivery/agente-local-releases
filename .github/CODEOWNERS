@@ -1,0 +1,7 @@
+# Donos padrao do repositorio.
+#
+# Sozinho, este arquivo apenas SUGERE revisores automaticamente nos pull requests.
+# Ele so passa a ser obrigatorio quando o ruleset da branch usar
+# require_code_owner_review — decisao da onda 2, junto com a criacao de develop/staging.
+
+* @Del-Match-Delivery/tech-leads
