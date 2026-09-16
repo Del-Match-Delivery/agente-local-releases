@@ -1,0 +1,80 @@
+name: Esteira
+
+# Portao da esteira develop -> staging -> main (mesmo fluxo do ComprouTai).
+#
+# O job "validate" e required status check nos rulesets de develop, staging e main.
+# Ele cobre o que nenhum ruleset do GitHub cobre:
+#   1. ORDEM: staging so recebe de develop; main so recebe de staging (ou hotfix/*
+#      em emergencia, com backport); develop recebe de branch de trabalho ou de main
+#      (sincronizacao de volta).
+#   2. CHAVE: todo PR de trabalho carrega a chave do work package do OpenProject
+#      (genpro.delmatch.com.br) no titulo ou na branch. Sem ela o sync nao move o
+#      ticket e o SLA nao conta. A validacao e de FORMATO, nao de existencia.
+#
+# Prefixos aceitos seguem o uso real dos repositorios (feat/fix sao os mais usados)
+# somados aos do ComprouTai (feature/bugfix/release).
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+    branches: [develop, staging, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: esteira-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ordem da esteira
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          echo "PR: $HEAD -> $BASE"
+          case "$BASE" in
+            main)
+              if [[ "$HEAD" == hotfix/* ]]; then
+                echo "::warning::hotfix direto em main ($HEAD). Abra o backport para develop depois do merge."
+              elif [[ "$HEAD" != "staging" ]]; then
+                echo "::error::main so recebe de staging (ou hotfix/* em emergencia). Veio de '$HEAD'."
+                exit 1
+              fi ;;
+            staging)
+              [[ "$HEAD" == "develop" ]] || { echo "::error::staging so recebe de develop. Veio de '$HEAD'."; exit 1; } ;;
+            develop)
+              if [[ ! "$HEAD" =~ ^(feat|feature|fix|bugfix|hotfix|chore|docs|refactor|security|sec|spike|release)/ && "$HEAD" != "main" ]]; then
+                echo "::error::develop recebe de feat|feature|fix|bugfix|hotfix|chore|docs|refactor|security|sec|spike|release/* ou de main (sincronizacao). Veio de '$HEAD'."
+                exit 1
+              fi ;;
+          esac
+          echo "ordem ok"
+
+      - name: Chave do work package
+        env:
+          HEAD: ${{ github.head_ref }}
+          TITLE: ${{ github.event.pull_request.title }}
+          CHAVES: "AGLR"
+        run: |
+          set -euo pipefail
+          case "$HEAD" in
+            develop|staging|main) echo "PR de promocao ou sincronizacao: chave dispensada."; exit 0 ;;
+          esac
+          primeira() { printf '%s\n' "$1" | grep -oE "\\b(${CHAVES})-[0-9]+\\b" | head -n1 || true; }
+          TK=$(primeira "$TITLE"); BK=$(primeira "$HEAD")
+          echo "titulo=${TK:-<nenhuma>} branch=${BK:-<nenhuma>}"
+          if [ -z "$TK" ] && [ -z "$BK" ]; then
+            echo "::error::PR sem chave do work package (${CHAVES}-N). Use branch 'feat/${CHAVES%%|*}-123-slug' ou titulo '[${CHAVES%%|*}-123] ...'."
+            exit 1
+          fi
+          # Titulo e branch com chaves diferentes: nao ha como saber qual e a certa, e
+          # escolher uma move o ticket errado em silencio.
+          if [ -n "$TK" ] && [ -n "$BK" ] && [ "$TK" != "$BK" ]; then
+            echo "::error title=Chave divergente::O titulo diz $TK e a branch diz $BK."
+            exit 1
+          fi
+          echo "chave ok: ${TK:-$BK}"
