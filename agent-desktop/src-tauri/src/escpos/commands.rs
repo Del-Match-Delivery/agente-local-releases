@@ -201,6 +201,55 @@ pub fn print_barcode_code128(data: &str, height: u8) -> Vec<u8> {
     bytes
 }
 
+/// Validate an EAN-13 code: exactly 13 digits and correct check digit.
+pub fn is_valid_ean13(code: &str) -> bool {
+    if code.len() != 13 || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+
+    let digits: Vec<u32> = code.bytes().map(|b| (b - b'0') as u32).collect();
+    let sum: u32 = digits[..12]
+        .iter()
+        .enumerate()
+        .map(|(i, d)| if i % 2 == 0 { *d } else { d * 3 })
+        .sum();
+    let check_digit = (10 - (sum % 10)) % 10;
+
+    check_digit == digits[12]
+}
+
+/// Print barcode (EAN-13). Returns empty bytes if `data` is not a valid
+/// EAN-13 code, so an invalid product code never emits malformed ESC/POS
+/// bytes into the receipt stream.
+pub fn print_barcode_ean13(data: &str, height: u8) -> Vec<u8> {
+    if !is_valid_ean13(data) {
+        return Vec::new();
+    }
+
+    let mut bytes = Vec::new();
+
+    // Set barcode height
+    bytes.extend(&[GS, b'h', height]);
+
+    // Set barcode width (2-6)
+    bytes.extend(&[GS, b'w', 2]);
+
+    // Set HRI position (below barcode)
+    bytes.extend(&[GS, b'H', 2]);
+
+    // Set HRI font
+    bytes.extend(&[GS, b'f', 0]);
+
+    // Print EAN13 (function 67 = EAN13 in the GS k <m> <n> form)
+    bytes.push(GS);
+    bytes.push(b'k');
+    bytes.push(67); // EAN13
+    bytes.push(data.len() as u8);
+    bytes.extend(data.as_bytes());
+
+    bytes
+}
+
 /// Beep (if supported)
 pub fn beep(times: u8, duration: u8) -> Vec<u8> {
     vec![ESC, b'B', times, duration]
@@ -222,5 +271,59 @@ pub fn set_double_height(enabled: bool) -> Vec<u8> {
         vec![ESC, b'd', 1]
     } else {
         vec![ESC, b'd', 0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Well-known valid EAN-13 test vector (correct check digit = 1).
+    const VALID_EAN13: &str = "4006381333931";
+
+    #[test]
+    fn is_valid_ean13_accepts_correct_check_digit() {
+        assert!(is_valid_ean13(VALID_EAN13));
+    }
+
+    #[test]
+    fn is_valid_ean13_rejects_wrong_check_digit() {
+        assert!(!is_valid_ean13("4006381333932"));
+    }
+
+    #[test]
+    fn is_valid_ean13_rejects_wrong_length() {
+        assert!(!is_valid_ean13("123456789012")); // 12 digits
+        assert!(!is_valid_ean13("12345678901234")); // 14 digits
+        assert!(!is_valid_ean13(""));
+    }
+
+    #[test]
+    fn is_valid_ean13_rejects_non_digits() {
+        assert!(!is_valid_ean13("400638133393A"));
+    }
+
+    #[test]
+    fn print_barcode_ean13_emits_bytes_for_valid_code() {
+        let bytes = print_barcode_ean13(VALID_EAN13, 60);
+        assert!(!bytes.is_empty());
+        // Ends with the raw EAN-13 digits themselves.
+        assert!(bytes.ends_with(VALID_EAN13.as_bytes()));
+    }
+
+    #[test]
+    fn print_barcode_ean13_returns_empty_bytes_for_invalid_code() {
+        assert_eq!(print_barcode_ean13("not-an-ean13", 60), Vec::<u8>::new());
+        assert_eq!(print_barcode_ean13("4006381333932", 60), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn print_barcode_code128_is_unchanged() {
+        // Guards against accidental edits to the pre-existing barcode function.
+        let bytes = print_barcode_code128("ABC123", 50);
+        assert_eq!(bytes[0], GS);
+        assert_eq!(bytes[1], b'h');
+        assert_eq!(bytes[2], 50);
+        assert!(bytes.ends_with(b"ABC123"));
     }
 }
