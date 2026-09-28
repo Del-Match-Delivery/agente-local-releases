@@ -1568,8 +1568,14 @@ def _fmt(content, jt, pt):
             _merged = dict(_ninho)
             _merged.update(content)  # content por cima — mantem tudo que ja veio no nivel de fora
             content = _merged
-    # Largura do papel: paper_width do content tem prioridade, default 48
-    pw = content.get("paper_width")
+    # Largura do papel: a config local da instalacao (cfg["paper_width_cols"], ajustavel na
+    # GUI para casar com a bobina fisica da impressora — 58mm=32 colunas, 80mm=48) tem
+    # prioridade sobre o paper_width do servidor, pois e um ajuste manual feito in loco pelo
+    # tecnico que conhece a bobina real — o servidor manda o mesmo valor pra loja toda (as
+    # vezes ate errado pra ela), entao nao pode sobrescrever uma correcao explicita feita na
+    # instalacao (COMP-46: com o servidor tendo prioridade, o ajuste manual de 58mm nunca
+    # surtia efeito). W e o ultimo fallback.
+    pw = cfg.get("paper_width_cols") or content.get("paper_width")
     w = int(pw) if pw and str(pw).isdigit() else W
     _fs = int(cfg.get("font_size", 0))
     # Para cozinha/bar: nao reduz w — todos os detalhes sempre aparecem.
@@ -3365,6 +3371,28 @@ def abrir_config(auto=False):
               font=("Segoe UI",9,"bold"),relief="flat",padx=8,pady=5,cursor="hand2").pack(side="left",padx=2)
     tk.Button(bi2,text="A+",command=lambda:_set_font_size(1),bg="#45475a",fg="#cdd6f4",
               font=("Segoe UI",9,"bold"),relief="flat",padx=8,pady=5,cursor="hand2").pack(side="left",padx=2)
+
+    # Controle de largura do papel: quando o servidor nao manda paper_width no job, o cupom
+    # cai no default de 48 colunas (80mm). Loja com bobina de 58mm precisa deste ajuste local
+    # na instalacao, senao separadores/comanda saem largos demais para o papel (COMP-46).
+    _LARGURAS_PAPEL = [("58mm",32), ("80mm",48)]
+    _pw_atual = int(cfg.get("paper_width_cols") or W)
+    _pw_idx0 = 0 if _pw_atual <= 32 else 1
+    tk.Frame(bi2,bg="#1e1e2e",width=20).pack(side="left")
+    tk.Label(bi2,text="Papel:",bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).pack(side="left",padx=(0,4))
+    _pw_var = tk.IntVar(value=_pw_idx0)
+    lbl_pw = tk.Label(bi2,text=_LARGURAS_PAPEL[_pw_idx0][0],bg="#313244",fg="#f9e2af",
+                      font=("Segoe UI",9,"bold"),padx=10,pady=5,width=8)
+    lbl_pw.pack(side="left",padx=2)
+    def _set_paper_width(idx):
+        _pw_var.set(idx)
+        nome,cols = _LARGURAS_PAPEL[idx]
+        cfg["paper_width_cols"] = cols
+        salvar_config(cfg)
+        lbl_pw.config(text=nome)
+    for _i,(_nome,_cols) in enumerate(_LARGURAS_PAPEL):
+        tk.Button(bi2,text=_nome,command=lambda i=_i:_set_paper_width(i),bg="#45475a",fg="#cdd6f4",
+                  font=("Segoe UI",9,"bold"),relief="flat",padx=8,pady=5,cursor="hand2").pack(side="left",padx=2)
 
     f2.columnconfigure(0,weight=1); f2.rowconfigure(1,weight=1)
 
