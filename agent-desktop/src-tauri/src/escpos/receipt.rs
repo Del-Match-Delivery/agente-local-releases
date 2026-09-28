@@ -22,6 +22,12 @@ pub struct ReceiptContent {
     pub delivery_address: Option<String>,
     pub table_number: Option<String>,
     pub created_at: String,
+    /// When true, prints each item's product code as an EAN-13 barcode
+    /// instead of plain text (falls back to text if the code isn't a
+    /// valid EAN-13). Defaults to false so agents receiving a payload
+    /// without this field keep printing exactly as before.
+    #[serde(default)]
+    pub print_barcode_ean13: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,8 +150,12 @@ impl ReceiptFormatter {
             // Código do produto (barcode/EAN), quando cadastrado
             if let Some(ref barcode) = item.barcode {
                 if !barcode.is_empty() {
-                    bytes.extend(print_text(&format!("  Cod: {}", barcode)));
-                    bytes.extend(line_feed());
+                    if content.print_barcode_ean13 && is_valid_ean13(barcode) {
+                        bytes.extend(print_barcode_ean13(barcode, 60));
+                    } else {
+                        bytes.extend(print_text(&format!("  Cod: {}", barcode)));
+                        bytes.extend(line_feed());
+                    }
                 }
             }
 
@@ -409,6 +419,77 @@ pub fn format_test_page() -> Vec<u8> {
     
     bytes.extend(feed_lines(4));
     bytes.extend(cut_paper());
-    
+
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALID_EAN13: &str = "4006381333931";
+
+    // Base payload shaped like what the backend sends today, i.e. with NO
+    // `print_barcode_ean13` key at all (simulates a store/agent that predates
+    // this feature).
+    fn legacy_payload_json(barcode: &str) -> serde_json::Value {
+        serde_json::json!({
+            "restaurant_name": "Loja Teste",
+            "items": [{
+                "name": "Produto",
+                "quantity": 1,
+                "unit_price_cents": 1000,
+                "total_cents": 1000,
+                "addons": [],
+                "barcode": barcode
+            }],
+            "subtotal_cents": 1000,
+            "discount_cents": 0,
+            "delivery_fee_cents": 0,
+            "total_cents": 1000,
+            "created_at": "2026-09-25T12:00:00Z"
+        })
+    }
+
+    #[test]
+    fn print_barcode_ean13_field_defaults_to_false_without_it_in_payload() {
+        let content: ReceiptContent =
+            serde_json::from_value(legacy_payload_json(VALID_EAN13)).unwrap();
+        assert_eq!(content.print_barcode_ean13, false);
+    }
+
+    #[test]
+    fn legacy_payload_keeps_printing_product_code_as_text() {
+        let content: ReceiptContent =
+            serde_json::from_value(legacy_payload_json(VALID_EAN13)).unwrap();
+        let formatter = ReceiptFormatter::new(80);
+        let bytes = formatter.format_customer_receipt(&content);
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains(&format!("Cod: {}", VALID_EAN13)));
+    }
+
+    #[test]
+    fn flag_enabled_with_valid_ean13_prints_barcode_instead_of_text() {
+        let mut json = legacy_payload_json(VALID_EAN13);
+        json["print_barcode_ean13"] = serde_json::json!(true);
+        let content: ReceiptContent = serde_json::from_value(json).unwrap();
+        let formatter = ReceiptFormatter::new(80);
+        let bytes = formatter.format_customer_receipt(&content);
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("Cod:"));
+        assert!(bytes
+            .windows(VALID_EAN13.len())
+            .any(|w| w == VALID_EAN13.as_bytes()));
+    }
+
+    #[test]
+    fn flag_enabled_with_invalid_ean13_falls_back_to_text() {
+        let mut json = legacy_payload_json("12345");
+        json["print_barcode_ean13"] = serde_json::json!(true);
+        let content: ReceiptContent = serde_json::from_value(json).unwrap();
+        let formatter = ReceiptFormatter::new(80);
+        let bytes = formatter.format_customer_receipt(&content);
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("Cod: 12345"));
+    }
 }
