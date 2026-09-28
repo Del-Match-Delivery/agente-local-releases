@@ -634,7 +634,7 @@ _ESCPOS_NEG_OFF = b"\x1b\x45\x00\x1b\x61\x00"              # bold off + left
 _MARCADOR_NEG_ON_PLACEHOLDER  = "\x01\x02NEG_ON\x02\x01"
 _MARCADOR_NEG_OFF_PLACEHOLDER = "\x01\x02NEG_OFF\x02\x01"
 
-_ALIASES_CODIGO_ITEM = ("codigo","codigo_produto","codigo_barras","cod_barras","sku","ean","ean13","barcode")
+_ALIASES_CODIGO_ITEM = ("barcode","codigo","codigo_produto","codigo_barras","cod_barras","sku","ean","ean13")
 
 def _codigo_do_item(item):
     """Retorna o codigo do produto (EAN/SKU) cadastrado no item, se houver.
@@ -667,13 +667,20 @@ def _escpos_barcode_ean13(codigo, altura=60):
         b"\n"
     )
 
-def _linha_codigo_item(item):
+def _linha_codigo_item(item, imprime_barcode=False):
     """Linha a imprimir com o codigo do item: marcador de barcode (vira bytes EAN-13 reais
-    em _substituir_marcadores_escpos) quando o codigo cadastrado e um EAN-13 valido, ou texto
-    'Cod: X' quando nao e. Retorna '' se o item nao tem codigo cadastrado."""
+    em _substituir_marcadores_escpos) quando 'imprime_barcode' esta ligado E o codigo
+    cadastrado e um EAN-13 valido, ou texto 'Cod: X' nos demais casos. Retorna '' se o item
+    nao tem codigo cadastrado.
+
+    'imprime_barcode' vem de content.get("print_barcode") — interruptor POR LOJA que o
+    backend controla (printer_settings.print_barcode, default false). Sem checar isso aqui,
+    qualquer loja com EAN-13 valido ja cadastrado passaria a imprimir barcode sem ter pedido,
+    quebrando o isolamento do piloto (contrato confirmado no repo do ComprouTai:
+    supabase/migrations/20260925120000_print_barcode_por_loja.sql)."""
     codigo = _codigo_do_item(item)
     if not codigo: return ""
-    if _valida_ean13(codigo): return f"[[EAN13:{codigo}]]"
+    if imprime_barcode and _valida_ean13(codigo): return f"[[EAN13:{codigo}]]"
     return f"  Cod: {codigo}"
 
 _MARCADOR_RE = re.compile(r"\[\[(BIG_ORDER_ON|BIG_ORDER_OFF|NEG_ON|NEG_OFF|EAN13:\d{13})\]\]")
@@ -1698,7 +1705,7 @@ def _fmt(content, jt, pt):
                 size=_size_do_item(item)
                 ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
                 ll += _linha_pai(item)
-                _cod_ln=_linha_codigo_item(item)
+                _cod_ln=_linha_codigo_item(item, content.get("print_barcode") is True)
                 if _cod_ln: ll.append(_cod_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
@@ -1774,7 +1781,7 @@ def _fmt(content, jt, pt):
                     size=_size_do_item(item)
                     q=_qtd_do_item(item); ll.append(f"[ {q}x ]  {_nome_com_tamanho(item)}")
                     ll += _linha_pai(item)
-                    _cod_ln=_linha_codigo_item(item)
+                    _cod_ln=_linha_codigo_item(item, content.get("print_barcode") is True)
                     if _cod_ln: ll.append(_cod_ln)
                     for a in _adicionais_do_item(item):
                         if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
@@ -1817,7 +1824,7 @@ def _fmt(content, jt, pt):
                     parts.append(enc(f"[ {q}x ]  {nome}"))
                     parts.append(FNORMAL)
                     for linha in _linha_pai(item): parts.append(enc(linha))
-                    _cod_ln=_linha_codigo_item(item)
+                    _cod_ln=_linha_codigo_item(item, content.get("print_barcode") is True)
                     if _cod_ln: parts.append(_substituir_marcadores_escpos(_cod_ln + "\n"))
                     for a in _adicionais_do_item(item):
                         if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
@@ -1869,7 +1876,7 @@ def _fmt(content, jt, pt):
                 size=_size_do_item(item)
                 ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
                 ll += _linha_pai(item)
-                _cod_ln=_linha_codigo_item(item)
+                _cod_ln=_linha_codigo_item(item, content.get("print_barcode") is True)
                 if _cod_ln: ll.append(_cod_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
@@ -1923,7 +1930,7 @@ def _fmt(content, jt, pt):
                 size=_size_do_item(item)
                 ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
                 ll += _linha_pai(item)
-                _cod_ln=_linha_codigo_item(item)
+                _cod_ln=_linha_codigo_item(item, content.get("print_barcode") is True)
                 if _cod_ln: ll.append(_cod_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
