@@ -1,5 +1,5 @@
 """Agente Local v3.4 - GUI na main thread, polling em background"""
-import asyncio, json, logging, sys, time, threading, os, subprocess, winreg, queue, hashlib, socket
+import asyncio, json, logging, sys, time, threading, os, subprocess, winreg, queue, hashlib, socket, re
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
@@ -634,33 +634,80 @@ _ESCPOS_NEG_OFF = b"\x1b\x45\x00\x1b\x61\x00"              # bold off + left
 _MARCADOR_NEG_ON_PLACEHOLDER  = "\x01\x02NEG_ON\x02\x01"
 _MARCADOR_NEG_OFF_PLACEHOLDER = "\x01\x02NEG_OFF\x02\x01"
 
+_ALIASES_CODIGO_ITEM = ("codigo","codigo_produto","codigo_barras","cod_barras","sku","ean","ean13","barcode")
+
+def _codigo_do_item(item):
+    """Retorna o codigo do produto (EAN/SKU) cadastrado no item, se houver.
+    Aceita varios aliases pois o backend ainda nao fixou um unico nome pra esta chave."""
+    if not isinstance(item, dict): return ""
+    for k in _ALIASES_CODIGO_ITEM:
+        v = item.get(k)
+        if v: return str(v).strip()
+    return ""
+
+def _valida_ean13(codigo):
+    """True se codigo tem exatamente 13 digitos e o digito verificador (padrao EAN-13) bate."""
+    if not isinstance(codigo, str) or len(codigo) != 13 or not codigo.isdigit():
+        return False
+    digitos = [int(c) for c in codigo]
+    soma = sum(d if i % 2 == 0 else d * 3 for i, d in enumerate(digitos[:12]))
+    dv = (10 - (soma % 10)) % 10
+    return dv == digitos[12]
+
+def _escpos_barcode_ean13(codigo, altura=60):
+    """Bytes ESC/POS (GS k, m=67/EAN13) com HRI (texto legivel) abaixo das barras.
+    So chamar com codigo ja validado por _valida_ean13 (13 digitos, todos ASCII)."""
+    dados = codigo.encode("ascii")
+    return (
+        bytes([0x1d, 0x68, altura]) +   # GS h: altura do barcode em pontos
+        bytes([0x1d, 0x77, 2]) +        # GS w: largura das barras (2-6)
+        bytes([0x1d, 0x48, 2]) +        # GS H: HRI abaixo do barcode
+        bytes([0x1d, 0x66, 0]) +        # GS f: fonte do HRI
+        bytes([0x1d, 0x6b, 67, len(dados)]) + dados +
+        b"\n"
+    )
+
+def _linha_codigo_item(item):
+    """Linha a imprimir com o codigo do item: marcador de barcode (vira bytes EAN-13 reais
+    em _substituir_marcadores_escpos) quando o codigo cadastrado e um EAN-13 valido, ou texto
+    'Cod: X' quando nao e. Retorna '' se o item nao tem codigo cadastrado."""
+    codigo = _codigo_do_item(item)
+    if not codigo: return ""
+    if _valida_ean13(codigo): return f"[[EAN13:{codigo}]]"
+    return f"  Cod: {codigo}"
+
+_MARCADOR_RE = re.compile(r"\[\[(BIG_ORDER_ON|BIG_ORDER_OFF|NEG_ON|NEG_OFF|EAN13:\d{13})\]\]")
+
 def _tem_marcador(texto):
     """True se a linha tem marcador ESC/POS que precisa virar bytes crus."""
-    return isinstance(texto, str) and ("[[BIG_ORDER_ON]]" in texto or "[[NEG_ON]]" in texto)
+    return isinstance(texto, str) and bool(_MARCADOR_RE.search(texto))
 
 def _substituir_marcadores_escpos(texto):
-    """Substitui marcadores '[[BIG_ORDER_ON/OFF]]' e '[[NEG_ON/OFF]]' por bytes ESC/POS reais.
-    Otimizado: usa placeholders com bytes de controle raros, encoda em bloco (cp850),
-    e substitui por bytes crus depois. Se nao houver marcador, retorna direto o encode.
-    """
+    """Substitui marcadores '[[BIG_ORDER_ON/OFF]]', '[[NEG_ON/OFF]]' e '[[EAN13:codigo]]' por
+    bytes ESC/POS reais. Percorre o texto em blocos: trechos comuns sao normalizados e
+    codificados no codepage da impressora (_enc), marcadores viram bytes crus diretamente —
+    o EAN-13 tem conteudo variavel (o codigo), entao nao da pra usar placeholder fixo como
+    os outros. Se nao houver marcador, retorna direto o encode (caminho rapido)."""
     if not isinstance(texto, str):
         # Blindagem: se por algum motivo veio None/bytes/outro tipo, converte
         texto = str(texto) if texto is not None else ""
     if not _tem_marcador(texto):
-        # Caminho rapido: sem marcador, encode direto em bloco
         return _enc(_txt(texto))
-    # Substitui marcadores por placeholders que sobrevivem ao encode
-    texto = texto.replace("[[BIG_ORDER_ON]]",  _MARCADOR_ON_PLACEHOLDER)
-    texto = texto.replace("[[BIG_ORDER_OFF]]", _MARCADOR_OFF_PLACEHOLDER)
-    texto = texto.replace("[[NEG_ON]]",  _MARCADOR_NEG_ON_PLACEHOLDER)
-    texto = texto.replace("[[NEG_OFF]]", _MARCADOR_NEG_OFF_PLACEHOLDER)
-    dados = _enc(_txt(texto))
-    # Troca placeholders pelos bytes ESC/POS (placeholders sao ASCII: _enc nao os altera)
-    dados = dados.replace(_enc(_MARCADOR_ON_PLACEHOLDER),  _ESCPOS_BIG_ON)
-    dados = dados.replace(_enc(_MARCADOR_OFF_PLACEHOLDER), _ESCPOS_BIG_OFF)
-    dados = dados.replace(_enc(_MARCADOR_NEG_ON_PLACEHOLDER),  _ESCPOS_NEG_ON)
-    dados = dados.replace(_enc(_MARCADOR_NEG_OFF_PLACEHOLDER), _ESCPOS_NEG_OFF)
-    return dados
+    partes = []
+    pos = 0
+    for m in _MARCADOR_RE.finditer(texto):
+        if m.start() > pos:
+            partes.append(_enc(_txt(texto[pos:m.start()])))
+        tag = m.group(1)
+        if tag == "BIG_ORDER_ON": partes.append(_ESCPOS_BIG_ON)
+        elif tag == "BIG_ORDER_OFF": partes.append(_ESCPOS_BIG_OFF)
+        elif tag == "NEG_ON": partes.append(_ESCPOS_NEG_ON)
+        elif tag == "NEG_OFF": partes.append(_ESCPOS_NEG_OFF)
+        elif tag.startswith("EAN13:"): partes.append(_escpos_barcode_ean13(tag.split(":",1)[1]))
+        pos = m.end()
+    if pos < len(texto):
+        partes.append(_enc(_txt(texto[pos:])))
+    return b"".join(partes)
 
 def _imprimir_raw(nome, conteudo):
     try:
@@ -1568,8 +1615,14 @@ def _fmt(content, jt, pt):
             _merged = dict(_ninho)
             _merged.update(content)  # content por cima — mantem tudo que ja veio no nivel de fora
             content = _merged
-    # Largura do papel: paper_width do content tem prioridade, default 48
-    pw = content.get("paper_width")
+    # Largura do papel: a config local da instalacao (cfg["paper_width_cols"], ajustavel na
+    # GUI para casar com a bobina fisica da impressora — 58mm=32 colunas, 80mm=48) tem
+    # prioridade sobre o paper_width do servidor, pois e um ajuste manual feito in loco pelo
+    # tecnico que conhece a bobina real — o servidor manda o mesmo valor pra loja toda (as
+    # vezes ate errado pra ela), entao nao pode sobrescrever uma correcao explicita feita na
+    # instalacao (COMP-46: com o servidor tendo prioridade, o ajuste manual de 58mm nunca
+    # surtia efeito). W e o ultimo fallback.
+    pw = cfg.get("paper_width_cols") or content.get("paper_width")
     w = int(pw) if pw and str(pw).isdigit() else W
     _fs = int(cfg.get("font_size", 0))
     # Para cozinha/bar: nao reduz w — todos os detalhes sempre aparecem.
@@ -1645,6 +1698,8 @@ def _fmt(content, jt, pt):
                 size=_size_do_item(item)
                 ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
                 ll += _linha_pai(item)
+                _cod_ln=_linha_codigo_item(item)
+                if _cod_ln: ll.append(_cod_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                     pc=a.get("preco_cents",0)
@@ -1719,6 +1774,8 @@ def _fmt(content, jt, pt):
                     size=_size_do_item(item)
                     q=_qtd_do_item(item); ll.append(f"[ {q}x ]  {_nome_com_tamanho(item)}")
                     ll += _linha_pai(item)
+                    _cod_ln=_linha_codigo_item(item)
+                    if _cod_ln: ll.append(_cod_ln)
                     for a in _adicionais_do_item(item):
                         if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                         ll.append(f"  + {a.get('nome','')}{_rota_sufixo(a)}")
@@ -1760,6 +1817,8 @@ def _fmt(content, jt, pt):
                     parts.append(enc(f"[ {q}x ]  {nome}"))
                     parts.append(FNORMAL)
                     for linha in _linha_pai(item): parts.append(enc(linha))
+                    _cod_ln=_linha_codigo_item(item)
+                    if _cod_ln: parts.append(_substituir_marcadores_escpos(_cod_ln + "\n"))
                     for a in _adicionais_do_item(item):
                         if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                         parts.append(enc(f"  + {a.get('nome','')}{_rota_sufixo(a)}"))
@@ -1810,6 +1869,8 @@ def _fmt(content, jt, pt):
                 size=_size_do_item(item)
                 ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
                 ll += _linha_pai(item)
+                _cod_ln=_linha_codigo_item(item)
+                if _cod_ln: ll.append(_cod_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                     pc=a.get("preco_cents",0)
@@ -1862,6 +1923,8 @@ def _fmt(content, jt, pt):
                 size=_size_do_item(item)
                 ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
                 ll += _linha_pai(item)
+                _cod_ln=_linha_codigo_item(item)
+                if _cod_ln: ll.append(_cod_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                     pc=a.get("preco_cents",0)
@@ -3365,6 +3428,28 @@ def abrir_config(auto=False):
               font=("Segoe UI",9,"bold"),relief="flat",padx=8,pady=5,cursor="hand2").pack(side="left",padx=2)
     tk.Button(bi2,text="A+",command=lambda:_set_font_size(1),bg="#45475a",fg="#cdd6f4",
               font=("Segoe UI",9,"bold"),relief="flat",padx=8,pady=5,cursor="hand2").pack(side="left",padx=2)
+
+    # Controle de largura do papel: quando o servidor nao manda paper_width no job, o cupom
+    # cai no default de 48 colunas (80mm). Loja com bobina de 58mm precisa deste ajuste local
+    # na instalacao, senao separadores/comanda saem largos demais para o papel (COMP-46).
+    _LARGURAS_PAPEL = [("58mm",32), ("80mm",48)]
+    _pw_atual = int(cfg.get("paper_width_cols") or W)
+    _pw_idx0 = 0 if _pw_atual <= 32 else 1
+    tk.Frame(bi2,bg="#1e1e2e",width=20).pack(side="left")
+    tk.Label(bi2,text="Papel:",bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).pack(side="left",padx=(0,4))
+    _pw_var = tk.IntVar(value=_pw_idx0)
+    lbl_pw = tk.Label(bi2,text=_LARGURAS_PAPEL[_pw_idx0][0],bg="#313244",fg="#f9e2af",
+                      font=("Segoe UI",9,"bold"),padx=10,pady=5,width=8)
+    lbl_pw.pack(side="left",padx=2)
+    def _set_paper_width(idx):
+        _pw_var.set(idx)
+        nome,cols = _LARGURAS_PAPEL[idx]
+        cfg["paper_width_cols"] = cols
+        salvar_config(cfg)
+        lbl_pw.config(text=nome)
+    for _i,(_nome,_cols) in enumerate(_LARGURAS_PAPEL):
+        tk.Button(bi2,text=_nome,command=lambda i=_i:_set_paper_width(i),bg="#45475a",fg="#cdd6f4",
+                  font=("Segoe UI",9,"bold"),relief="flat",padx=8,pady=5,cursor="hand2").pack(side="left",padx=2)
 
     f2.columnconfigure(0,weight=1); f2.rowconfigure(1,weight=1)
 
