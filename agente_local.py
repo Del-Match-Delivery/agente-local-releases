@@ -1568,10 +1568,14 @@ def _fmt(content, jt, pt):
             _merged = dict(_ninho)
             _merged.update(content)  # content por cima — mantem tudo que ja veio no nivel de fora
             content = _merged
-    # Largura do papel: paper_width do content (servidor) tem prioridade sobre a config
-    # local da instalacao (cfg["paper_width_cols"], ajustavel na GUI para casar com a
-    # bobina fisica da impressora — 58mm=32 colunas, 80mm=48), com W como ultimo fallback.
-    pw = content.get("paper_width") or cfg.get("paper_width_cols")
+    # Largura do papel: a config local da instalacao (cfg["paper_width_cols"], ajustavel na
+    # GUI para casar com a bobina fisica da impressora — 58mm=32 colunas, 80mm=48) tem
+    # prioridade sobre o paper_width do servidor, pois e um ajuste manual feito in loco pelo
+    # tecnico que conhece a bobina real — o servidor manda o mesmo valor pra loja toda (as
+    # vezes ate errado pra ela), entao nao pode sobrescrever uma correcao explicita feita na
+    # instalacao (COMP-46: com o servidor tendo prioridade, o ajuste manual de 58mm nunca
+    # surtia efeito). W e o ultimo fallback.
+    pw = cfg.get("paper_width_cols") or content.get("paper_width")
     w = int(pw) if pw and str(pw).isdigit() else W
     _fs = int(cfg.get("font_size", 0))
     # Para cozinha/bar: nao reduz w — todos os detalhes sempre aparecem.
