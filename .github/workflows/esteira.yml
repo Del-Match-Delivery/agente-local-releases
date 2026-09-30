@@ -58,7 +58,7 @@ jobs:
         env:
           HEAD: ${{ github.head_ref }}
           TITLE: ${{ github.event.pull_request.title }}
-          CHAVES: "AGLR|COMP"
+          CHAVES: "AGLR|COMP|AGNT"
         run: |
           set -euo pipefail
           case "$HEAD" in
