@@ -18,13 +18,17 @@ function Fmt-Item($i) {
 }
 # Builds conhecidos (sha256 -> versao). Tamanho serve como 2a pista.
 $KNOWN = @{
+    'FD86010E8625A0E2A964C9DD283D7B9CFA06352D1604D3466F0D1AD47DC1D56C' = 'v5.80 (acentos por impressora + utf8 + Testar acentos, largura do papel, AGENDADO, EAN-13, quebra de linha, numero da casa)'
+    'A35048BBC60733C0CFF24576B7C13524233E95ECFFC72ADB917DB5496D1C0F15' = 'v5.80 build de 30/09 16:02, antes da revisao de impressao (nunca publicado; substitua)'
+    'B2DB05DC189578EB716E5AD08CB2DA3CC8AC68ACC3DB6A45FA480EC558970D32' = 'v5.80 build de 29/09 sem a opcao utf8 (nunca publicado; substitua)'
+    'BF18475B60D2443A4656A28CF482CD860627D0F2DCDD705390589DC353D169FA' = 'v5.79 (largura do papel do cardapio/por impressora, AGENDADO em altura dupla, config tolerante a BOM)'
     '928C4773FEBBEF90A589CA9177BA316CC95E9891C9FA9E04BA8628D7B35ED8AF' = 'v5.78 FINAL 09/09 (clique abre painel, AGENDADO, hora BRT, auto-update consertado, le latest_*)'
     '10F59D2A00C8150D475C0304F13317F7BDA94E22315B20B47F9297C39678B9D6' = 'v5.78 build 08/09 14:36 (sem a hora BRT no cabecalho; substitua pela final)'
     '1D84EA8412E15D0A56B43AF52086B3D90AFEEFE0C65EAE80861BD1BB645FD753' = 'v5.78 build 08/09 12:04 (sem latest_* nem teto de tentativas; substitua pela final)'
     '46AA4077213263767816DB0D7F5C01DF0BCC9232D22B8469C8A1DE2A1E116E80' = 'v5.77 (OK, mas auto-update de dentro do agente nao aplica: bat morre no taskkill)'
     'A4CA3CC5E43D1989DD8BD3442EFC538A6D3ABB5BC3509332C21A0B5FB2D1B9B8' = 'v5.76 (QUEBRADA - sem runtime persistente, abre e fecha)'
 }
-$KNOWN_SIZE = @{ 20328340 = 'v5.78 final 09/09'; 20326383 = 'v5.78 (build 08/09 14:36)'; 20324743 = 'v5.78 (build 08/09 12:04)'; 20312299 = 'v5.77'; 20319145 = 'v5.76' }
+$KNOWN_SIZE = @{ 20339731 = 'v5.80'; 20338138 = 'v5.80 (build 16:02)'; 20337694 = 'v5.80 (build 29/09 sem utf8)'; 20330455 = 'v5.79'; 20328340 = 'v5.78 final 09/09'; 20326383 = 'v5.78 (build 08/09 14:36)'; 20324743 = 'v5.78 (build 08/09 12:04)'; 20312299 = 'v5.77'; 20319145 = 'v5.76' }
 function Ident-Exe($path) {
     $fi = Get-Item $path
     $h  = (Get-FileHash $path -Algorithm SHA256).Hash
@@ -116,13 +120,25 @@ if (-not (Test-Path $data)) {
 } else {
     Get-ChildItem $data -Force | ForEach-Object { Wl (Fmt-Item $_) }
     $cfgp = Join-Path $data 'config.json'
+    if (Test-Path (Join-Path $data 'config.ilegivel.bak')) { Wl '*** config.ilegivel.bak existe: o config.json estava ilegivel (BOM/ANSI/JSON quebrado) e o agente subiu com config vazia (v5.79+). Ate a v5.78 isso derrubava o agente no boot. Refaca o pareamento (token) ou restaure o backup em UTF-8 sem BOM. ***' }
     if (Test-Path $cfgp) {
+        $b3 = [IO.File]::ReadAllBytes($cfgp)
+        if ($b3.Length -ge 3 -and $b3[0] -eq 0xEF -and $b3[1] -eq 0xBB -and $b3[2] -eq 0xBF) { Wl '*** config.json tem BOM UTF-8: agente <=5.78 NAO ABRE com este arquivo (erro "Unexpected UTF-8 BOM" antes do log). Salve em UTF-8 sem BOM ou atualize para 5.79+. ***' }
         $c = Get-Content $cfgp -Raw -Encoding UTF8 | ConvertFrom-Json
         $tok = 'AUSENTE'
         if ($c.token) { $tok = 'presente (' + ([string]$c.token).Length + ' chars)' }
         $nImp = 0; if ($c.impressoras) { $nImp = @($c.impressoras).Count }
         Wl ('config.json: restaurant_id=' + $c.restaurant_id + '  restaurant_name=' + $c.restaurant_name + '  token=' + $tok + '  impressoras=' + $nImp)
         if (-not $c.token -or -not $c.restaurant_id) { Wl '    -> SEM token/restaurant_id: o agente abre a tela de BOAS-VINDAS a cada inicio.' }
+        $cpPad = 'cp850'; if ($c.codepage) { $cpPad = [string]$c.codepage }
+        $pwPad = 'auto (cardapio ou 48)'; if ($c.paper_width_cols) { $pwPad = [string]$c.paper_width_cols + ' (ajuste local geral)' }
+        Wl ('    acentos padrao do agente: ' + $cpPad + '   colunas padrao: ' + $pwPad)
+        foreach ($ii in @($c.impressoras)) {
+            if (-not $ii) { continue }
+            $col = 'auto'; if ($ii.colunas) { $col = [string]$ii.colunas }
+            $acc = 'padrao'; if ($ii.codepage) { $acc = [string]$ii.codepage }
+            Wl ('    impressora "' + $ii.nome + '" area=' + $ii.area + ' windows="' + $ii.nome_impressora + '" colunas=' + $col + ' acentos=' + $acc)
+        }
     } else {
         Wl 'config.json: NAO existe -> agente vai abrir BOAS-VINDAS (primeira execucao).'
     }
