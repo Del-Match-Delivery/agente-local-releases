@@ -1,0 +1,156 @@
+name: Manifesto de atualização
+
+# Por que existe: o agente instalado nas lojas decide se atualiza lendo o
+# `version.json` da branch `main` (agente_local.py:2306). Ele compara o campo
+# `version` com a versão que roda e baixa o que estiver em `url` — os campos
+# `latest_version` e `latest_url` NÃO são lidos por ele.
+#
+# Esse arquivo era editado à mão, separado do ato de publicar a release, e ficou
+# para trás: em 30/09/2026 dizia `version: 5.77` com `url` da v5.78, enquanto a
+# v5.79 já estava publicada. Quem estava na 5.77 comparava 5.77 com 5.77 e não
+# atualizava; quem estava na 5.78 era mandado de volta para a 5.78. Ninguém
+# recebia a versão nova, e não havia erro em lugar nenhum para avisar.
+#
+# Aqui o manifesto passa a sair da própria release: a tag e o endereço do
+# instalador vêm da release publicada, não de convenção de nome. Errar o nome do
+# asset deixaria a base inteira sem conseguir atualizar.
+#
+# O workflow NUNCA escreve direto em `main` — abre PR. A branch protegida exige
+# revisão, e a virada do manifesto é o gatilho que atualiza todas as lojas: isso
+# é decisão de gente, não de automação.
+
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag da release (vazio = a mais recente)"
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: manifesto-atualizacao
+  cancel-in-progress: false
+
+jobs:
+  sincronizar:
+    name: Atualizar o version.json a partir da release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Descobrir a release e o instalador
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_EVENTO: ${{ github.event.release.tag_name }}
+          TAG_MANUAL: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${TAG_EVENTO:-$TAG_MANUAL}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --json tagName -q .tagName)
+            echo "nenhuma tag informada, usando a release mais recente: $TAG"
+          fi
+
+          # O endereço vem da release, não de convenção de nome de arquivo.
+          URL=$(gh release view "$TAG" --json assets \
+                 -q '[.assets[] | select(.name | endswith(".exe"))][0].url // ""')
+          if [ -z "$URL" ]; then
+            echo "::error::a release $TAG não tem nenhum .exe anexado — o manifesto não pode apontar para o vazio"
+            exit 1
+          fi
+
+          TITULO=$(gh release view "$TAG" --json name -q '.name // ""')
+          VERSAO="${TAG#v}"
+
+          {
+            echo "tag=$TAG"
+            echo "url=$URL"
+            echo "versao=$VERSAO"
+            echo "titulo=${TITULO:-$TAG}"
+          } >> "$GITHUB_OUTPUT"
+          echo "release $TAG -> $URL"
+
+      - name: Reescrever o manifesto
+        id: manifesto
+        run: |
+          set -euo pipefail
+          # `version` e `url` são os campos que o agente lê. `latest_*` ficam
+          # iguais de propósito: hoje eles divergem, e é dessa divergência que
+          # nasce a dúvida de qual é a versão corrente.
+          jq --arg v "${{ steps.rel.outputs.versao }}" \
+             --arg u "${{ steps.rel.outputs.url }}" \
+             --arg n "${{ steps.rel.outputs.titulo }}" \
+             '.version = $v | .url = $u | .latest_version = $v | .latest_url = $u | .notes = $n' \
+             version.json > /tmp/version.json
+          mv /tmp/version.json version.json
+
+          if git diff --quiet -- version.json; then
+            echo "mudou=false" >> "$GITHUB_OUTPUT"
+            echo "o manifesto já aponta para ${{ steps.rel.outputs.tag }} — nada a fazer"
+          else
+            echo "mudou=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff -- version.json
+          fi
+
+      - name: Abrir os PRs
+        if: steps.manifesto.outputs.mudou == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          VERSAO: ${{ steps.rel.outputs.versao }}
+          URL: ${{ steps.rel.outputs.url }}
+        run: |
+          set -euo pipefail
+          # `hotfix/` porque o portão da esteira só aceita `staging` ou `hotfix/*`
+          # em `main`, e o manifesto vive em `main`. A chave AGLR-2 é a tarefa
+          # permanente deste automatismo.
+          BRANCH="hotfix/AGLR-2-manifesto-$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null 2>&1; then
+            echo "a branch $BRANCH já existe — o PR desta release já foi aberto, nada a fazer"
+            exit 0
+          fi
+
+          git checkout -b "$BRANCH"
+          git add version.json
+          git commit \
+            -m "AGLR-2 chore(manifesto): aponta o auto-update para $TAG" \
+            -m "O agente le version.json em main e compara o campo version com a versao que roda. Esta mudanca e o que faz a $TAG efetivamente chegar as lojas." \
+            -m "Gerado a partir da release $TAG: $URL"
+          git push -u origin "$BRANCH"
+
+          {
+            printf '%s\n' "Manifesto de atualização apontando para a release **$TAG**."
+            printf '%s\n' ""
+            printf '%s\n' "| Campo | Valor |"
+            printf '%s\n' "| --- | --- |"
+            printf '%s\n' "| version (o campo que o agente compara) | $VERSAO |"
+            printf '%s\n' "| url (o que o agente baixa) | $URL |"
+            printf '%s\n' ""
+            printf '%s\n' "Gerado a partir da própria release: a tag e o endereço do instalador vêm dela, não de convenção de nome de arquivo."
+            printf '%s\n' ""
+            printf '%s\n' "**Efeito do merge:** todo agente instalado em versão diferente passa a baixar a $TAG na próxima checagem. É por isso que isto é um PR e não um push direto: a virada é decisão de gente."
+            printf '%s\n' ""
+            printf '%s\n' "Tarefa: AGLR-2."
+          } > /tmp/corpo.md
+
+          gh pr create --base main --head "$BRANCH" \
+            --title "[AGLR-2] Manifesto de atualização: $TAG" --body-file /tmp/corpo.md
+
+          # `main` e `develop` precisam ficar com o mesmo manifesto, senão o
+          # próximo merge de develop reverte a virada sem ninguém perceber.
+          gh pr create --base develop --head "$BRANCH" \
+            --title "[AGLR-2] Sincroniza o manifesto de $TAG em develop" \
+            --body "Mesma mudança do PR para \`main\`, para \`develop\` não reverter o manifesto no próximo merge. Tarefa: AGLR-2." \
+            || echo "::warning::não consegui abrir o PR de sincronização para develop — abra à mão"
