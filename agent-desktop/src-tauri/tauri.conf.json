@@ -24,7 +24,7 @@
       },
       "path": {
         "all": true
-      },
+      }
     },
     "bundle": {
       "active": true,
