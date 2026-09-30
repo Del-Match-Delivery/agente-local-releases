@@ -1,0 +1,109 @@
+# Tela Configuracoes > impressoras (v5.80): coluna Acentos, combobox, Aplicar e Testar acentos.
+# Monta a janela Tk DE VERDADE (abre por instantes na tela), sem imprimir nada e sem gravar config.
+# Uso: venv_build\Scripts\python.exe tests\test_ui_config.py [caminho\agente_local.py]
+import importlib.util, sys, io, contextlib, os, tempfile
+from pathlib import Path
+
+os.environ["LOCALAPPDATA"] = tempfile.mkdtemp(prefix="agente_ui_")   # DATA_DIR isolado
+SRC = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "agente_local.py"
+spec = importlib.util.spec_from_file_location("agente_sob_teste_ui", str(SRC))
+A = importlib.util.module_from_spec(spec)
+with contextlib.redirect_stdout(io.StringIO()):
+    spec.loader.exec_module(A)
+
+gravados, impressos, avisos = [], [], []
+A.salvar_config = lambda c: gravados.append([dict(i) for i in c.get("impressoras", [])])
+A.listar_impressoras_windows = lambda: ["POS-58", "EPSON TM-T20"]
+A.listar_portas_serial = lambda: []
+A._imprimir_com_roteamento = lambda imp, dados: (impressos.append((dict(imp), dados)), {"ok": True})[1]
+for nome in ("showinfo", "showwarning", "showerror"):
+    setattr(A.messagebox, nome, (lambda n: (lambda *a, **k: avisos.append((n, a))))(nome))
+CFG = {"token": "t", "restaurant_id": "r", "restaurant_name": "Loja Teste", "poll_interval": 3,
+              "impressoras": [{"nome": "Mini", "area": "caixa", "printer_type": "receipt", "tipo": "comum_win32",
+                               "nome_impressora": "POS-58", "colunas": 32, "codepage": "ascii"},
+                              {"nome": "Cozinha", "area": "cozinha", "printer_type": "kitchen", "tipo": "comum_win32",
+                               "nome_impressora": "EPSON TM-T20"}],
+              "balancas": []}
+A.cfg = CFG
+A.carregar_config = lambda: CFG   # abrir_config() recarrega a config do disco
+
+import tkinter as tk
+A._root = tk.Tk(); A._root.withdraw()
+A.abrir_config()
+w = A._janela_config
+w.update_idletasks()
+
+def todos(wd):
+    yield wd
+    for c in wd.winfo_children():
+        yield from todos(c)
+ws = list(todos(w))
+ti = next(x for x in ws if x.winfo_class() == "Treeview" and "acentos" in x["columns"])
+linhas = {ti.item(i, "values")[0]: ti.item(i, "values") for i in ti.get_children()}
+assert linhas["Mini"][4:] == ("32", "ascii"), linhas["Mini"]
+assert linhas["Cozinha"][4:] == ("", ""), linhas["Cozinha"]
+print("1) coluna Acentos e Colunas carregadas da config OK:", linhas["Mini"])
+
+combos = [x for x in ws if x.winfo_class() == "TCombobox"]
+eacc = next(x for x in combos if "ascii" in x.cget("values") and "cp860" in x.cget("values"))
+ecol = next(x for x in combos if tuple(x.cget("values")) in (("", "32", "42", "48"), ("32", "42", "48")) or "42" in x.cget("values") and "48" in x.cget("values") and "cp850" not in x.cget("values") and "POS-58" not in x.cget("values"))
+eiw = next(x for x in combos if "POS-58" in x.cget("values") and int(str(x.cget("width"))) >= 30)
+botoes = {x.cget("text"): x for x in ws if x.winfo_class() == "Button"}
+assert "Testar acentos" in botoes and "Aplicar" in botoes, sorted(botoes)
+print("2) combobox Acentos, Colunas e botao 'Testar acentos' presentes OK")
+
+# Aplicar na Cozinha: 42 colunas + cp860
+iid_coz = next(i for i in ti.get_children() if ti.item(i, "values")[0] == "Cozinha")
+ti.selection_set(iid_coz)
+eiw.set("EPSON TM-T20"); ecol.set("42"); eacc.set("cp860")
+botoes["Aplicar"].invoke()
+imp_coz = next(i for i in CFG["impressoras"] if i["nome"] == "Cozinha")
+assert imp_coz.get("colunas") == 42 and imp_coz.get("codepage") == "cp860", imp_coz
+assert ti.item(iid_coz, "values")[4:] == ("42", "cp860"), ti.item(iid_coz, "values")
+assert gravados and any(i.get("codepage") == "cp860" for i in gravados[-1])
+print("3) Aplicar grava colunas=42 e acentos=cp860 na config e na tabela OK")
+
+# Valor invalido e recusado, sem gravar
+n = len(gravados)
+ti.selection_set(iid_coz); eiw.set("EPSON TM-T20"); ecol.set(""); eacc.set("koi8r")
+botoes["Aplicar"].invoke()
+assert len(gravados) == n and imp_coz.get("codepage") == "cp860" and avisos[-1][0] == "showwarning"
+print("4) acentos invalido e recusado com aviso, nada gravado OK")
+
+# Limpar os campos volta ao padrao
+ti.selection_set(iid_coz); eiw.set("EPSON TM-T20"); ecol.set(""); eacc.set("")
+botoes["Aplicar"].invoke()
+assert "codepage" not in imp_coz and "colunas" not in imp_coz, imp_coz
+print("5) campos vazios removem o ajuste (volta ao padrao) OK")
+
+# Testar acentos na Mini: manda a pagina de teste para a impressora selecionada
+iid_mini = next(i for i in ti.get_children() if ti.item(i, "values")[0] == "Mini")
+ti.selection_set(iid_mini)
+botoes["Testar acentos"].invoke()
+assert impressos and impressos[-1][0].get("nome_impressora") == "POS-58"
+assert impressos[-1][1] == A._bytes_teste_acentos()
+assert avisos[-1][0] == "showinfo"
+print("6) 'Testar acentos' envia a pagina de teste para a impressora selecionada OK")
+
+# 'Testar Impressao' usa a tabela de acentos DA LINHA selecionada
+testes_raw = []
+A._imprimir_raw = lambda nome, txt: (testes_raw.append((nome, A._cp())), {"ok": True})[1]
+ti.selection_set(iid_mini)
+botoes["Testar Impressao"].invoke()
+assert testes_raw and testes_raw[-1] == ("POS-58", "ascii"), testes_raw
+print("6b) 'Testar Impressao' imprime com os Acentos da impressora (ascii) OK")
+
+# 'Conectar' preserva os ajustes locais (colunas/acentos)
+A.autoconfigurar = lambda token: {"ok": True, "data": {"restaurant_id": "r", "restaurant_name": "Loja Teste",
+    "printers": [{"name": "Mini", "printer_type": "receipt"}, {"name": "Cozinha", "printer_type": "kitchen"}]}}
+next(i for i in CFG["impressoras"] if i["nome"] == "Mini").update({"colunas": 32, "codepage": "ascii"})
+if "Conectar ao Sistema" in botoes:
+    botoes["Conectar ao Sistema"].invoke()
+    mini = next(i for i in CFG["impressoras"] if i["nome"] == "Mini")
+    assert mini.get("colunas") == 32 and mini.get("codepage") == "ascii", mini
+    print("7) 'Conectar' mantem colunas/acentos da impressora OK")
+else:
+    print("7) (botao Conectar nao encontrado pelo texto; pulado)", sorted(botoes))
+
+w.destroy(); A._root.destroy()
+print("\nUI CONFIG: TUDO OK")

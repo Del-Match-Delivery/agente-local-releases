@@ -67,6 +67,11 @@ def _resolver_data_dir():
 DATA_DIR     = _resolver_data_dir()
 CONFIG_PATH  = DATA_DIR / "config.json"
 LOG_PATH     = DATA_DIR / "agente.log"
+# Sinal "abrir janela" (v5.78): quando o lojista clica no .exe com o agente JA rodando (na
+# bandeja), a copia nova escreve este arquivo e a instancia que ja roda o consome e mostra
+# o painel de Status. Antes, o clique nao fazia NADA visivel ("esta no gerenciador de
+# tarefas mas nao abre"): a copia nova perdia a eleicao e morria em ~15s, em silencio.
+SHOW_FLAG    = DATA_DIR / "abrir_janela.flag"
 
 def _migrar_config_para_data_dir():
     """Na 1a execucao com config em DATA_DIR: se ainda nao existe config la, procura
@@ -165,12 +170,43 @@ def _registrar_falha(job_id, causa, detalhe, tipo="", pedido="", cliente="", imp
     _stats["ultimo_erro"] = detalhe[:120]
     log.error(f"[FALHA] {causa} | job={job_id} | {detalhe}")
 
+_CONFIG_VAZIA = {"token":"","anon_key":"","restaurant_id":"","restaurant_name":"","poll_interval":3,
+                 "impressoras":[],"balancas":[],"ultima_sincronizacao":""}
+
 def carregar_config():
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, encoding="utf-8") as f:
-            return json.load(f)
-    return {"token":"","anon_key":"","restaurant_id":"","restaurant_name":"","poll_interval":3,
-            "impressoras":[],"balancas":[],"ultima_sincronizacao":""}
+    """Le o config.json. v5.79: TOLERANTE. Ate a v5.78 era json.load em utf-8 estrito, e um
+    config.json com BOM (Bloco de Notas antigo grava BOM; PowerShell Set-Content tambem) ou
+    salvo em ANSI (acento no nome da loja) derrubava o agente NO BOOT com
+    'Unexpected UTF-8 BOM' / UnicodeDecodeError — 'nao abre', sem nada no log. Agora:
+    utf-8-sig (aceita BOM) -> cp1252 -> se o JSON continuar ilegivel, guarda o arquivo como
+    config.ilegivel.bak, loga e sobe com config vazia (abre as boas-vindas) em vez de morrer."""
+    if not CONFIG_PATH.exists():
+        return dict(_CONFIG_VAZIA)
+    try:
+        bruto = CONFIG_PATH.read_bytes()
+    except Exception as e:
+        log.error(f"[CONFIG] Nao consegui ler {CONFIG_PATH}: {e}; subindo com config vazia")
+        return dict(_CONFIG_VAZIA)
+    texto = None
+    for enc in ("utf-8-sig", "cp1252"):
+        try:
+            texto = bruto.decode(enc); break
+        except Exception:
+            continue
+    if texto is not None:
+        try:
+            dados = json.loads(texto)
+            if isinstance(dados, dict):
+                return dados
+        except Exception as e:
+            log.error(f"[CONFIG] config.json invalido ({e})")
+    try:
+        bak = CONFIG_PATH.with_name("config.ilegivel.bak")
+        bak.write_bytes(bruto)
+        log.error(f"[CONFIG] config.json ilegivel; copia guardada em {bak}. Subindo com config vazia.")
+    except Exception:
+        pass
+    return dict(_CONFIG_VAZIA)
 
 def salvar_config(c):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -304,6 +340,24 @@ def _auto_reparo_boot():
     try:
         eu = Path(sys.executable)
         alvo = eu.parent / "AgenteLocal.exe"
+        # 0) v5.78: restos de update. update_lock.tmp e a trava do bat ('if exist lock exit');
+        #    ate a v5.77 o bat morria no proprio taskkill e deixava a trava PARA SEMPRE => todo
+        #    update futuro saia na 1a linha, em silencio. Um bat vivo segura a trava por ~1 min;
+        #    com mais de 10 min e lixo. Zera tambem o contador de tentativas quando ele aponta
+        #    para a MINHA versao: o update para ela deu certo.
+        for _nome in ("update_lock.tmp", "update_apply.bat"):
+            try:
+                _f = eu.parent / _nome
+                if _f.exists() and (time.time() - _f.stat().st_mtime) > 600:
+                    _f.unlink(); log.info(f"[REPARO] Removido resto de update antigo: {_nome}")
+            except Exception:
+                pass
+        try:
+            _t = DATA_DIR / "update_tentativas.json"
+            if _t.exists() and json.loads(_t.read_text(encoding="utf-8")).get("version") == str(CURRENT_VERSION):
+                _t.unlink()
+        except Exception:
+            pass
         # 1) Se meu nome nao e o fixo, garante que existe um AgenteLocal.exe atualizado
         if eu.name.lower() != "agentelocal.exe":
             try:
@@ -376,12 +430,13 @@ def _post(url, data, token, timeout=30, retries=2):
 
 _agents_online = []  # Atualizado a cada poll
 _token_invalido = False  # Evita abrir configuracoes multiplas vezes
+_paper_width_servidor = None  # printer_settings.paper_width do cardapio (32/42/48), vindo do poll (v5.79)
 _config_auto_ja = False  # ja auto-abrimos a config nesta sessao (NUNCA reabrir sozinho depois)
 _janela_config = None    # janela de config unica (singleton: nao empilha nem rouba foco no automatico)
 _janela_dashboard = None # janela de status unica (singleton)
 
 def ef_poll_jobs():
-    global _agents_online, _token_invalido, _config_auto_ja
+    global _agents_online, _token_invalido, _config_auto_ja, _paper_width_servidor
     imps = cfg.get("impressoras", [])
     # Declara TODAS as areas cadastradas (com ou sem nome_impressora).
     # O agente recebe todos os jobs das suas areas e processa apenas os que tem impressora mapeada.
@@ -408,6 +463,17 @@ def ef_poll_jobs():
     if s==200 and resp:
         _token_invalido = False
         _agents_online = resp.get("agents_online", [])
+        # v5.79: largura do papel configurada no cardapio (printer_settings.paper_width: 32/42/48).
+        # O poll SEMPRE mandou isto em resp.settings e o agente ignorava. Jobs criados pelo
+        # trigger nao trazem paper_width no content, entao o cupom saia em 48 colunas numa
+        # impressora de 42 (precos quebrando em duas linhas). Guardado aqui, aplicado em proc_job.
+        try:
+            _pw = _colunas_validas((resp.get("settings") or {}).get("paper_width"))
+            if _pw and _pw != _paper_width_servidor:
+                log.info(f"[POLL] Largura do papel (cardapio): {_pw} colunas")
+                _paper_width_servidor = _pw
+        except Exception:
+            pass
         jobs = resp.get("print_jobs") or resp.get("jobs") or []
         if isinstance(resp, list): jobs = resp
         log.info(f"[POLL] OK areas={areas} jobs={len(jobs)} tipos={[j.get('printer_type') for j in jobs]} agentes={[a.get('device_name') for a in _agents_online]}")
@@ -563,16 +629,49 @@ import unicodedata
 # impressora ficava no PC437 de fabrica, onde os bytes de 'ã'(C6) e 'õ'(E4) sao moldura
 # (╞, Σ) e todo acento MAIUSCULO tambem quebra. Os minusculos (á é í ó ú â ê ô ç ü) tem o
 # mesmo byte nas duas tabelas, por isso so "varios" acentos saiam errados, nao todos.
-CP_TAB={"cp850":2,"cp437":0,"cp860":3,"cp858":19,"cp1252":16}
+CP_TAB={"cp850":2,"cp437":0,"cp860":3,"cp858":19,"cp1252":16,"utf8":0,"ascii":0}
+# "utf8" (v5.80): para impressora que vem em MODO UTF-8 (varios clones de 58 mm). Nesse modo o
+# ESC t e ignorado e NENHUMA tabela de 1 byte funciona: o byte do acento e lido como inicio de
+# uma sequencia UTF-8 e engole a letra seguinte ("Nao" -> "N" + lixo). Mandando o texto em UTF-8
+# de verdade, sai certo. O ESC t 0 que vai junto e ignorado pela propria impressora.
+# "ascii" (v5.80): tira TODOS os acentos (Pao, Maca, Acai). Nenhum byte >= 0x80 vai para a
+# impressora, entao sai certo em QUALQUER modelo — inclusive mini impressora de 58 mm que
+# ignora o ESC t, numera as tabelas diferente ou fica presa no modo chines.
 # Caracteres que nao existem em cp850 e chegam do cadastro (aspas curvas, travessao...)
 TRANS={"–":"-","—":"-","‒":"-","―":"-","‘":"'","’":"'",
        "‚":"'","“":'"',"”":'"',"„":'"',"…":"...","•":"*",
        "→":"->"," ":" ","​":"","⁄":"/","−":"-","ʼ":"'"}
 
+# Codepage da impressora da VEZ (v5.80). Ate a v5.79 o codepage era UM so para o agente todo
+# (cfg["codepage"], cp850, sem tela para mudar): o agente mandava ESC t 2 (PC850) para toda
+# impressora. Mini impressoras de 58 mm (firmware generico) muitas vezes numeram as tabelas de
+# outro jeito, ignoram o ESC t ou ficam no modo chines — e cada acento saia como outra letra.
+# Agora cada impressora pode ter o seu ("Acentos" na tela Configuracoes). O valor fica num
+# threading.local porque a impressao roda na thread do poll e o teste de acentos na da GUI.
+_cp_local = threading.local()
+
+def _normaliza_cp(v):
+    e = str(v or "").strip().lower().replace("-", "").replace("_", "")
+    return e if e in CP_TAB else ""
+
 def _cp():
-    """Encoding configurado pra impressora (o padrao cp850 cobre portugues)."""
-    e=str(cfg.get("codepage","cp850")).lower().replace("-","")
-    return e if e in CP_TAB else "cp850"
+    """Encoding em uso: o da impressora da vez (_usar_codepage), senao cfg['codepage'], senao cp850."""
+    o = getattr(_cp_local, "cp", None)
+    if o: return o
+    return _normaliza_cp(cfg.get("codepage", "cp850")) or "cp850"
+
+def _cp_da_impressora(imp):
+    """Codepage efetivo de uma impressora: imp['codepage'] > cfg['codepage'] > cp850."""
+    return (_normaliza_cp((imp or {}).get("codepage"))
+            or _normaliza_cp(cfg.get("codepage", "cp850")) or "cp850")
+
+class _usar_codepage:
+    """with _usar_codepage("cp860"): ... — formata/imprime com esse codepage nesta thread."""
+    def __init__(self, cp): self.cp = _normaliza_cp(cp) or None
+    def __enter__(self):
+        self.ant = getattr(_cp_local, "cp", None); _cp_local.cp = self.cp; return self
+    def __exit__(self, *a):
+        _cp_local.cp = self.ant; return False
 
 def _escpos_cp():
     """Comando ESC t que poe a impressora no mesmo codepage em que o texto e codificado.
@@ -590,7 +689,12 @@ def _txt(s):
     'a'+acento separados contam 2 caracteres e desalinham a coluna de preco."""
     if not isinstance(s,str) or not s: return s
     s=unicodedata.normalize("NFC",s)
-    return "".join(TRANS.get(c,c) for c in s)
+    s="".join(TRANS.get(c,c) for c in s)
+    # v5.80: no modo ascii, as trocas que mudam o TAMANHO ('½'->'1/2', '€'->'EUR') acontecem aqui,
+    # antes de qualquer medida de coluna; se ficassem so no _enc, a linha de preco passava do papel.
+    if _cp() == "ascii":
+        s="".join(_ASCII_EXTRA.get(c,c) for c in s)
+    return s
 
 def _norm(v):
     """Aplica _txt em todo texto do content, inclusive dentro de listas/dicts."""
@@ -599,17 +703,58 @@ def _norm(v):
     if isinstance(v,dict): return {k:_norm(x) for k,x in v.items()}
     return v
 
+# Equivalentes usados SO no modo ascii, para simbolos que nao tem letra-base no NFKD e
+# sumiriam do papel (ex.: "1º" viraria "1").
+_ASCII_EXTRA = {"·":"-", "°":"o", "º":"o", "ª":"a", "×":"x", "½":"1/2", "¼":"1/4", "¾":"3/4",
+                "€":"EUR", "£":"L", "¢":"c", "§":"S", "¿":"?", "¡":"!", "«":'"', "»":'"',
+                "±":"+-", "²":"2", "³":"3", "µ":"u", "ß":"ss", "æ":"ae", "Æ":"AE", "ø":"o",
+                "Ø":"O", "œ":"oe", "Œ":"OE"}
+
 def _enc(texto):
     """Codifica pro codepage da impressora. Caractere sem equivalente perde o acento em vez
     de virar '?'; se nem assim couber (emoji, simbolo), e descartado. Substitui o antigo
     .encode('cp850','replace'), que enchia o cupom de '?'."""
     enc=_cp(); out=bytearray()
     for c in texto:
+        if enc == "ascii" and c in _ASCII_EXTRA:   # v5.80: simbolo sem letra-base (º, ·, €...)
+            out += _ASCII_EXTRA[c].encode("ascii"); continue
         try: out+=c.encode(enc); continue
         except UnicodeEncodeError: pass
         base="".join(x for x in unicodedata.normalize("NFKD",c) if not unicodedata.combining(x))
         try: out+=base.encode(enc)
         except UnicodeEncodeError: pass
+    return bytes(out)
+
+# 3 linhas curtas: ate o bloco utf8 impresso numa impressora que NAO e UTF-8 (2 bytes por acento
+# viram 2 colunas) cabe em 32 colunas, sem a linha quebrar e confundir a leitura dos blocos.
+_AMOSTRA_ACENTOS = ("Pão Maçã Açaí Café Avô", "ÁÉÍÓÚ ÂÊÔ ÃÕ Ç", "nº 1º 2ª 30°")
+_CP_TESTE = ("cp850", "cp860", "cp1252", "cp858", "cp437", "utf8", "ascii")
+
+def _bytes_teste_acentos():
+    """Pagina de teste (v5.80): a MESMA frase com acentos impressa em cada tabela, cada uma com
+    o seu ESC t. O lojista olha qual bloco saiu certo e escolhe essa opcao em 'Acentos'. Os
+    rotulos sao ASCII puro (saem certos em qualquer tabela). Linhas de ate 30 colunas: cabe em
+    58 mm. Comeca com ESC @ (reset) + FS . (sai do modo chines) — nessa ordem, porque o reset
+    pode religar o modo chines de fabrica."""
+    out = bytearray(b"\x1b\x40\x1c\x2e")
+    def L(t): out.extend(t.encode("ascii") + b"\n")
+    L("=" * 30); L("TESTE DE ACENTOS".center(30)); L("=" * 30)
+    L("Cada bloco usa uma tabela.")
+    L("Escolha a que saiu CERTA em")
+    L("Configuracoes > Acentos.")
+    L("-" * 30)
+    for i, nome in enumerate(_CP_TESTE, 1):
+        out.extend(bytes([0x1b, 0x74, CP_TAB[nome]]))
+        L(f"{i}) {nome}")
+        with _usar_codepage(nome):
+            for amostra in _AMOSTRA_ACENTOS:
+                out.extend(b"   " + _enc(_txt(amostra)) + b"\n")
+    out.extend(bytes([0x1b, 0x74, 0]))
+    L("-" * 30)
+    L("Nenhuma certa? Use ascii:")
+    L("tira os acentos e sai certo")
+    L("em qualquer impressora.")
+    out.extend(b"\n\n\n\n\x1b\x64\x05\x1d\x56\x00")
     return bytes(out)
 
 def _escpos_font_prefix():
@@ -633,6 +778,14 @@ _ESCPOS_NEG_ON  = b"\x1b\x61\x01\x1b\x45\x01"              # center + bold on
 _ESCPOS_NEG_OFF = b"\x1b\x45\x00\x1b\x61\x00"              # bold off + left
 _MARCADOR_NEG_ON_PLACEHOLDER  = "\x01\x02NEG_ON\x02\x01"
 _MARCADOR_NEG_OFF_PLACEHOLDER = "\x01\x02NEG_OFF\x02\x01"
+
+# Negrito centralizado em ALTURA dupla e largura NORMAL (GS ! 0x01). Usado pelo destaque de
+# pedido AGENDADO (v5.79): em 2x2 a linha "AGENDADO: 24/09 AS 19:00" (24 chars) so cabe em
+# impressora de 48 colunas; em 42 colunas (cabeca de 512 pontos, muito comum) ela quebrava no
+# meio do horario — "...AS 19" / ":00" — visto em loja em 24/09/2026. Altura dupla mantem o
+# destaque e cabe em qualquer papel de 24+ colunas sem quebrar.
+_ESCPOS_ALTO_ON  = b"\x1b\x61\x01\x1b\x45\x01\x1d\x21\x01"  # center + bold on + altura 2x
+_ESCPOS_ALTO_OFF = b"\x1d\x21\x00\x1b\x45\x00\x1b\x61\x00"  # normal + bold off + left
 
 _ALIASES_CODIGO_ITEM = ("barcode","codigo","codigo_produto","codigo_barras","cod_barras","sku","ean","ean13")
 
@@ -683,14 +836,14 @@ def _linha_codigo_item(item, imprime_barcode=False):
     if imprime_barcode and _valida_ean13(codigo): return f"[[EAN13:{codigo}]]"
     return f"  Cod: {codigo}"
 
-_MARCADOR_RE = re.compile(r"\[\[(BIG_ORDER_ON|BIG_ORDER_OFF|NEG_ON|NEG_OFF|EAN13:\d{13})\]\]")
+_MARCADOR_RE = re.compile(r"\[\[(BIG_ORDER_ON|BIG_ORDER_OFF|NEG_ON|NEG_OFF|ALTO_ON|ALTO_OFF|EAN13:\d{13})\]\]")
 
 def _tem_marcador(texto):
     """True se a linha tem marcador ESC/POS que precisa virar bytes crus."""
     return isinstance(texto, str) and bool(_MARCADOR_RE.search(texto))
 
 def _substituir_marcadores_escpos(texto):
-    """Substitui marcadores '[[BIG_ORDER_ON/OFF]]', '[[NEG_ON/OFF]]' e '[[EAN13:codigo]]' por
+    """Substitui marcadores '[[BIG_ORDER_ON/OFF]]', '[[NEG_ON/OFF]]', '[[ALTO_ON/OFF]]' e '[[EAN13:codigo]]' por
     bytes ESC/POS reais. Percorre o texto em blocos: trechos comuns sao normalizados e
     codificados no codepage da impressora (_enc), marcadores viram bytes crus diretamente —
     o EAN-13 tem conteudo variavel (o codigo), entao nao da pra usar placeholder fixo como
@@ -710,6 +863,8 @@ def _substituir_marcadores_escpos(texto):
         elif tag == "BIG_ORDER_OFF": partes.append(_ESCPOS_BIG_OFF)
         elif tag == "NEG_ON": partes.append(_ESCPOS_NEG_ON)
         elif tag == "NEG_OFF": partes.append(_ESCPOS_NEG_OFF)
+        elif tag == "ALTO_ON": partes.append(_ESCPOS_ALTO_ON)     # v5.79: destaque AGENDADO (altura dupla)
+        elif tag == "ALTO_OFF": partes.append(_ESCPOS_ALTO_OFF)
         elif tag.startswith("EAN13:"): partes.append(_escpos_barcode_ean13(tag.split(":",1)[1]))
         pos = m.end()
     if pos < len(texto):
@@ -788,7 +943,14 @@ def _res_imp_por_rede(pt, printer_id=None):
                     or str(i.get("nome_impressora","")).strip().lower() == pid_norm):
                 if i.get("nome_impressora","") or i.get("endereco_ip",""):
                     return dict(i) if "tipo" in i else {**i, "tipo": i.get("tipo","comum_win32")}
-    # Sem printer_id (ou nao encontrado): 1a impressora da area do agente
+    # Sem printer_id (ou nao encontrado): 1a impressora da area do agente. v5.80: devolve o dict
+    # COMPLETO da config, nao so o nome. So com o nome, o job com printer_id (UUID do servidor, que
+    # a config local nao guarda) perdia 'codepage' e 'colunas' da impressora: uma mini em modo
+    # UTF-8 configurada como 'utf8' voltava a receber cp850 em 48 colunas.
+    for i in imps_legado:
+        if (str(i.get("area","")).strip().lower() in areas_pt
+                or str(i.get("printer_type","")).strip() == pt) and i.get("nome_impressora",""):
+            return {**i, "tipo": i.get("tipo") or "comum_win32"}
     nome = _res_imp(pt)
     if nome:
         return {"nome_impressora": nome, "tipo": "comum_win32"}
@@ -847,6 +1009,34 @@ def _R(v):
     except: return "R$ 0,00"
 
 W=48
+
+def _colunas_validas(v):
+    """Largura de papel valida em colunas (24..64) ou None. Aceita int/str; lixo => None."""
+    try:
+        n = int(str(v).strip())
+        return n if 24 <= n <= 64 else None
+    except Exception:
+        return None
+
+def _largura_efetiva(imp, content, servidor):
+    """Largura do papel em COLUNAS para formatar o cupom. Precedencia (v5.79 + COMP-46), do
+    mais especifico/manual para o mais generico:
+      1) 'colunas' da impressora na config local (campo 'Colunas do papel', por impressora);
+      2) cfg['paper_width_cols'] — ajuste local GERAL (botoes 58/76/80 mm da tela, COMP-46):
+         feito in loco por quem conhece a bobina; o servidor manda o mesmo valor pra loja toda
+         e nao pode sobrescrever uma correcao explicita da instalacao;
+      3) paper_width que veio no content do job (print-job-create manda);
+      4) printer_settings.paper_width do cardapio (chega em resp.settings do poll) — o caso
+         dos jobs do trigger, que nao trazem paper_width no content;
+      5) W (48).
+    Sem isto, impressora de 42 colunas recebia cupom formatado em 48 e cada linha de preco
+    quebrava em duas ("R$ 1" / "11.70"), visto em loja em 24/09/2026."""
+    for v in ((imp or {}).get("colunas"), cfg.get("paper_width_cols"),
+              (content or {}).get("paper_width"), servidor):
+        c = _colunas_validas(v)
+        if c: return c
+    return W
+
 TL={"counter":"BALCAO","dine_in":"MESA","takeaway":"RETIRADA","delivery":"ENTREGA","pickup":"RETIRADA","table":"MESA","balcao":"BALCAO","mesa":"MESA","retirada":"RETIRADA","entrega":"ENTREGA"}
 PL={"cash":"Dinheiro","credit":"Cartao Credito","debit":"Cartao Debito","pix":"PIX","card":"Cartao","money":"Dinheiro","creditcard":"Cartao Credito","debitcard":"Cartao Debito"}
 
@@ -1133,6 +1323,97 @@ def _linhas_selo_loja(content, w):
     if not nome: return []
     return [f"[[NEG_ON]]{linha}[[NEG_OFF]]" for linha in _wrap_linhas(f"LOJA: {nome.upper()}", w)]
 
+# ---------------------------------------------------------------------------
+# Pedido AGENDADO: contrato do print_jobs.content (migration 20260805130000)
+# ---------------------------------------------------------------------------
+# O trigger trg_print_content_schedule (BEFORE INSERT OR UPDATE OF content em print_jobs)
+# roda enrich_print_content_with_schedule() e, SO quando orders.scheduled_for esta
+# preenchido, mescla no content:
+#   is_scheduled ..... true
+#   scheduled_for .... "2026-09-09T15:00:00+00:00"  (UTC CRU — nao usar sem converter)
+#   scheduled_date ... "09/09/2026"                 (ja em America/Sao_Paulo)
+#   scheduled_time ... "12:00"                      (ja no relogio da loja)
+#   scheduled_label .. "AGENDADO: 09/09 AS 12:00"   (linha PRONTA para a impressora)
+# Pedido nao agendado = campos AUSENTES (nao vem false/null). Regras duras:
+#   - imprimir scheduled_label COMO VEIO: sem acento de proposito ("AS", nao "ÀS"), porque
+#     CP850/latin1 corrompe acento em varias termicas; nao re-formatar nem "corrigir";
+#   - NUNCA converter fuso de novo: scheduled_date/time ja estao no relogio da loja (somar
+#     ou subtrair 3h foi o bug que derrubou o agendamento em 30/07); so scheduled_for e UTC;
+#   - funil unico: o trigger cobre todas as origens (cardapio, PDV, KDS, reimpressao) — o
+#     agente NAO busca orders.scheduled_for por conta propria;
+#   - is_scheduled nao decide nada aqui: o criterio e scheduled_label existir.
+# Referencia de renderizacao: agente Tauri, agent-source/src-tauri/src/escpos/receipt.rs.
+
+def _rotulo_agendado(content):
+    """scheduled_label do content, ou '' quando o pedido nao e agendado / campo ausente.
+    Mesmos 3 shapes do print_item_category (raiz, pedido, order); a raiz vence porque e la
+    que o trigger grava."""
+    if not isinstance(content, dict): return ""
+    v = content.get("scheduled_label")
+    if v in (None, ""):
+        for _k in ("pedido", "order"):
+            _sub = content.get(_k)
+            if isinstance(_sub, dict) and _sub.get("scheduled_label"):
+                v = _sub.get("scheduled_label"); break
+    if v in (None, ""): return ""
+    s = str(v).strip()
+    # Blindagem: servidor mandando "null"/"None" nao pode virar linha de destaque no papel
+    return "" if s.lower() in ("null", "none", "undefined", "nan") else s
+
+def _linhas_agendado(content, w_fis):
+    """Linhas do destaque de agendamento em negrito + ALTURA dupla centralizado ([[ALTO_ON]]),
+    ou [] quando o pedido nao e agendado.
+    v5.78 usava 2x2 ([[BIG_ORDER_ON]], como o agente Tauri). Em 2x2 cada caractere ocupa 2
+    colunas: "AGENDADO: 24/09 AS 19:00" (24 chars) so cabia em 48 colunas — em impressora de 42
+    (muito comum) a PROPRIA impressora quebrava a linha no meio do horario ("...AS 19" / ":00"),
+    visto em loja em 24/09/2026. Altura dupla (largura normal) mantem o destaque e a linha
+    inteira cabe em qualquer papel de 24+ colunas. w_fis = largura FISICA do papel; a quebra
+    por espaco so acontece em papel mais estreito que a label (nunca no meio do horario)."""
+    rotulo = _rotulo_agendado(content)
+    if not rotulo: return []
+    return [f"[[ALTO_ON]]{linha}[[ALTO_OFF]]"
+            for linha in _wrap_linhas(rotulo, max(8, int(w_fis)))]
+
+# ---------------------------------------------------------------------------
+# Data/hora do pedido no RELOGIO DA LOJA (v5.78)
+# ---------------------------------------------------------------------------
+# O trigger create_print_jobs_on_new_order grava content.created_at = now() em UTC, e o
+# agent-unified-poll (o endpoint deste agente) NAO acrescenta created_at_brt/hora_brt — so o
+# agent-jobs (usado pelo agente Tauri antigo) fazia isso. Resultado ate a v5.77: o cupom saia
+# SEM linha 'Data:' e a comanda imprimia 'Hora:' com a hora UTC crua, 3h adiantada. Aqui
+# convertemos para Brasilia como o agente Tauri (receipt.rs: FixedOffset -3). UTC-3 fixo:
+# o Brasil nao tem horario de verao desde 2019 e todo o sistema (trigger de agendamento,
+# edge functions) padroniza America/Sao_Paulo. zoneinfo nao serve: o build nao carrega tzdata.
+from datetime import datetime as _DT, timezone as _TZ, timedelta as _TD
+_BRT = _TZ(_TD(hours=-3))
+
+def _dt_brt(iso):
+    """ISO do banco -> datetime em Brasilia; None se ilegivel. Sem fuso => assume UTC (e como o
+    banco grava). Aceita 'Z', '+00:00', '+00', fracao de segundos, e 'T' ou espaco."""
+    if not iso or not isinstance(iso, str): return None
+    s = iso.strip().replace("Z", "+00:00")
+    try:
+        dt = _DT.fromisoformat(s)
+    except Exception:
+        try: dt = _DT.fromisoformat(s[:19])
+        except Exception: return None
+    if dt.tzinfo is None: dt = dt.replace(tzinfo=_TZ.utc)
+    return dt.astimezone(_BRT)
+
+def _data_hora_brt(content):
+    """('DD/MM/AAAA HH:MM', 'HH:MM') do pedido no relogio da loja. Prioridade: created_at_brt e
+    hora_brt PRONTOS do servidor (shape agent-jobs) — nunca reconverte o que ja veio em BRT.
+    Senao converte content.created_at (UTC) para Brasilia. NUNCA imprime a hora UTC crua."""
+    if not isinstance(content, dict): return "", ""
+    data = str(content.get("created_at_brt") or "").strip()
+    hora = str(content.get("hora_brt") or "").strip()
+    if not data or not hora:
+        dt = _dt_brt(content.get("created_at"))
+        if dt is not None:
+            data = data or dt.strftime("%d/%m/%Y %H:%M")
+            hora = hora or dt.strftime("%H:%M")
+    return data, hora
+
 def _grupos_por_categoria(itens, ativo):
     """Agrupa os itens por categoria e devolve [(nome_categoria, [itens]), ...].
     Categoria '' = grupo SEM cabecalho.
@@ -1262,7 +1543,13 @@ def _bloco_endereco(content, w, titulo="ENTREGA:"):
         return _campo(src, *nomes)
 
     # Numero da casa — pode vir separado mesmo quando ha string pronta.
-    num = g("delivery_number", "delivery_address_number", "number", "numero", "numero_casa", "house_number")
+    # v5.80: 'numero' SO vale dentro do OBJETO de endereco. No content plano, 'numero' e o numero do
+    # PEDIDO (e assim que o cupom inteiro o le): pedido sem campo de numero da casa saia com
+    # "Numero: <numero do pedido>" no bloco de entrega, como se fosse o numero da casa.
+    _nomes_num = ["delivery_number", "delivery_address_number", "number", "numero_casa", "house_number"]
+    if src is not content:
+        _nomes_num.insert(3, "numero")
+    num = g(*_nomes_num)
     if addr:
         linhas.append(addr)
         # Se a string pronta NAO contem o numero da casa, imprime o numero em linha propria.
@@ -1386,6 +1673,31 @@ def _wrap_linhas(texto, w, indent=""):
                 out.append(indent + atual); atual = palavra
         if atual:
             out.append(indent + atual)
+    return out
+
+def _quebrar_linhas_longas(linhas, w):
+    """Quebra, na palavra, as linhas de texto maiores que o papel (v5.80). Antes a propria
+    impressora quebrava onde a coluna acabava, no meio da palavra: o endereco de entrega saia
+    "...Monte Alto" / ", SP, CEP" e a observacao do cliente idem. Linhas que ja cabem (e as com
+    marcador [[...]]) saem EXATAMENTE iguais. Continuacao de "+ adicional" e ">> obs" fica
+    recuada sob o texto. Aceita elementos com '\\n' dentro (observacao em varias linhas)."""
+    out = []
+    for item in linhas:
+        if not isinstance(item, str):
+            out.append(item); continue
+        for l in item.split("\n"):
+            if len(l) <= w or "[[" in l:
+                out.append(l); continue
+            corpo = l.lstrip(" ")
+            lead = " " * (len(l) - len(corpo))
+            cont = lead + ("  " if corpo.startswith(("+ ", ">> ")) else "")
+            partes = _wrap_linhas(corpo, w - len(lead))
+            if not partes:
+                out.append(l); continue
+            out.append(lead + partes[0])
+            resto = " ".join(partes[1:])
+            if resto:
+                out.extend(_wrap_linhas(resto, w, cont))
     return out
 
 def _par(esq, dir_, w):
@@ -1605,7 +1917,7 @@ def _cupom_fiscal_bytes(content, fiscal, w):
     p.append(b"\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")  # avanco + corte (bem depois da Divisao IX)
     return b"".join(p)
 
-def _fmt(content, jt, pt):
+def _fmt(content, jt, pt, imp=None):
     # Se o servidor mandar content aninhado ({pedido: {...}}), desembrulha campos do pedido
     # para que o resto do codigo continue lendo do 'content' plano.
     # Campos de nivel do content (auto_print, paper_width, company_name, etc.) tem prioridade
@@ -1622,15 +1934,11 @@ def _fmt(content, jt, pt):
             _merged = dict(_ninho)
             _merged.update(content)  # content por cima — mantem tudo que ja veio no nivel de fora
             content = _merged
-    # Largura do papel: a config local da instalacao (cfg["paper_width_cols"], ajustavel na
-    # GUI para casar com a bobina fisica da impressora — 58mm=32 colunas, 80mm=48) tem
-    # prioridade sobre o paper_width do servidor, pois e um ajuste manual feito in loco pelo
-    # tecnico que conhece a bobina real — o servidor manda o mesmo valor pra loja toda (as
-    # vezes ate errado pra ela), entao nao pode sobrescrever uma correcao explicita feita na
-    # instalacao (COMP-46: com o servidor tendo prioridade, o ajuste manual de 58mm nunca
-    # surtia efeito). W e o ultimo fallback.
-    pw = cfg.get("paper_width_cols") or content.get("paper_width")
-    w = int(pw) if pw and str(pw).isdigit() else W
+    # Largura do papel: precedencia unica em _largura_efetiva (colunas da impressora > ajuste
+    # local geral > paper_width do job > largura do cardapio via poll > 48). 'imp' e a
+    # impressora resolvida em proc_job; chamadas sem impressora (teste/reimpressao) pulam o 1.
+    w = _largura_efetiva(imp, content, _paper_width_servidor)
+    w_fis = w   # largura FISICA do papel; w pode ser reduzido abaixo por font_size (so receipt)
     _fs = int(cfg.get("font_size", 0))
     # Para cozinha/bar: nao reduz w — todos os detalhes sempre aparecem.
     # Fonte grande so no nome do item (inline via ESC/POS); addons/obs em normal.
@@ -1683,7 +1991,7 @@ def _fmt(content, jt, pt):
         if _selo: ll += _selo + [S]
         n=content.get("numero","") or content.get("order_number","")
         if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
-        data_brt=content.get("created_at_brt","")
+        data_brt,_=_data_hora_brt(content)   # BRT: created_at_brt do servidor ou created_at (UTC) convertido
         if data_brt: ll.append(f"Data: {data_brt}")
         tp=content.get("order_type","")
         if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
@@ -1697,6 +2005,10 @@ def _fmt(content, jt, pt):
         # Telefone do cliente (controlado por print_customer_info)
         ph=content.get("customer_phone","")
         if ph and show_phone: ll.append(f"Tel: {ph}")
+        # AGENDADO: logo apos Cliente/Mesa/Tel e ANTES dos itens, com separador + negrito 2x2
+        # (contrato do print_jobs.content; espelha o agente Tauri). Ausente => cupom igual.
+        _ag=_linhas_agendado(content, w_fis)
+        if _ag: ll.append(S); ll += _ag
         ll.append(S)
         DP="."*w
         for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
@@ -1749,6 +2061,9 @@ def _fmt(content, jt, pt):
         cab += _linhas_selo_loja(content, w)
         n=content.get("numero","") or content.get("order_number","")
         if n: cab.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
+        # AGENDADO dentro do bloco grande (2x2), junto do numero/tipo/mesa: e o dado que define
+        # se o item entra em producao AGORA ou depois — quem esta na chapa le antes dos itens.
+        cab += _linhas_agendado(content, w_fis)
         tp=content.get("order_type","")
         if tp: cab.append(f"** {TL.get(tp,tp.upper())} **".center(w))
         m=content.get("table_number","")
@@ -1756,15 +2071,9 @@ def _fmt(content, jt, pt):
         c2=content.get("customer_name","")
         if c2: cab.append(f"Cliente: {c2}")
         if tipo=="kitchen":
-            hora=content.get("hora_brt","")
-            if not hora:
-                # Fallback: converte created_at (jobs antigos)
-                try:
-                    from datetime import datetime
-                    dt=content.get("created_at","")
-                    if dt:
-                        hora=datetime.fromisoformat(dt.replace('Z','+00:00')).strftime('%H:%M')
-                except: pass
+            # v5.78: hora em BRT. O fallback antigo fazia fromisoformat(created_at).strftime —
+            # imprimia a hora UTC crua (3h adiantada) em todo job vindo do agent-unified-poll.
+            _,hora=_data_hora_brt(content)
             if hora: cab.append(f"Hora: {hora}")
         cab.append(S)
 
@@ -1804,12 +2113,13 @@ def _fmt(content, jt, pt):
             # sem passar pelo prefixo montado em _imprimir_raw/_imprimir_tcp.
             parts = [_escpos_cp(), FNORMAL]
             enc = lambda s: _enc(_txt(s)+"\n")
+            encq = lambda s: b"".join(enc(x) for x in _quebrar_linhas_longas([s], w))   # v5.80: quebra na palavra
             for linha in cab:
                 if _tem_marcador(linha):
                     # Substitui marcadores por bytes ESC/POS reais
                     parts.append(_substituir_marcadores_escpos(linha + "\n"))
                 else:
-                    parts.append(enc(linha))
+                    parts.append(encq(linha))
             itens=_itens_do_content(content)
             # Cabecalho de categoria em fonte NORMAL (como o resto do cab): em fonte grande a
             # linha de largura w estouraria o papel e quebraria em duas.
@@ -1828,9 +2138,9 @@ def _fmt(content, jt, pt):
                     if _cod_ln: parts.append(_substituir_marcadores_escpos(_cod_ln + "\n"))
                     for a in _adicionais_do_item(item):
                         if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
-                        parts.append(enc(f"  + {a.get('nome','')}{_rota_sufixo(a)}"))
+                        parts.append(encq(f"  + {a.get('nome','')}{_rota_sufixo(a)}"))
                     obs=_obs_do_item(item)
-                    if obs: parts.append(enc(f"  >> {obs}"))
+                    if obs: parts.append(encq(f"  >> {obs}"))
                     parts.append(enc(DP_str))
             # Um setor pode receber comanda sem item proprio (ex: bar so com bebida de combo)
             if not itens:
@@ -1838,7 +2148,7 @@ def _fmt(content, jt, pt):
             obs2=content.get("notes","")
             if obs2:
                 parts.append(enc(S))
-                parts.append(enc(f"OBS: {obs2}"))
+                parts.append(encq(f"OBS: {obs2}"))
             parts.append(enc(S))
             parts.append(FNORMAL)
             parts.append(b"\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")  # avanço + corte
@@ -1858,7 +2168,7 @@ def _fmt(content, jt, pt):
         if _selo: ll += _selo + [S]
         n=content.get("numero","") or content.get("order_number","")
         if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
-        data_brt=content.get("created_at_brt","")
+        data_brt,_=_data_hora_brt(content)   # BRT: created_at_brt do servidor ou created_at (UTC) convertido
         if data_brt: ll.append(f"Data: {data_brt}")
         tp=content.get("order_type","")
         if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
@@ -1868,6 +2178,9 @@ def _fmt(content, jt, pt):
         if ph and show_phone: ll.append(f"Tel: {ph}")
         cod=content.get("pickup_code","")
         if cod: ll.append(f"Codigo: {cod}".center(w))
+        # AGENDADO antes dos itens (mesma regra do cupom): quem retira precisa ver o horario
+        _ag=_linhas_agendado(content, w_fis)
+        if _ag: ll.append(S); ll += _ag
         ll.append(S)
         DP="."*w
         for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
@@ -1914,7 +2227,7 @@ def _fmt(content, jt, pt):
         if _selo: ll += _selo + [S]
         n=content.get("numero","") or content.get("order_number","")
         if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
-        data_brt=content.get("created_at_brt","")
+        data_brt,_=_data_hora_brt(content)   # BRT: created_at_brt do servidor ou created_at (UTC) convertido
         if data_brt: ll.append(f"Data: {data_brt}")
         tp=content.get("order_type","delivery")
         ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
@@ -1922,6 +2235,9 @@ def _fmt(content, jt, pt):
         if c2: ll.append(f"Cliente: {c2}")
         t2=content.get("customer_phone","")
         if t2 and show_phone: ll.append(f"Tel: {t2}")
+        # AGENDADO antes dos itens (mesma regra do cupom): entrega agendada sai com o horario
+        _ag=_linhas_agendado(content, w_fis)
+        if _ag: ll.append(S); ll += _ag
         ll.append(S)
         DP="."*w
         for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
@@ -1958,14 +2274,17 @@ def _fmt(content, jt, pt):
         ll += _bloco_endereco(content, w, titulo="ENDERECO:")
         ll.append(S)
     elif tipo=="command":
-        if content.get("command")=="open_drawer": return "\x1b\x70\x00\x19\xfa"
+        # v5.80: BYTES, nao texto. Como texto, o '\xfa' (pulso da gaveta) passava pelo codepage:
+        # em cp850 virava 0xA3 e em utf8 virava 2 bytes (C3 BA), deixando um byte solto no papel.
+        # Como bytes vai cru, exatamente 1B 70 00 19 FA, sem alimentar/cortar papel a toa.
+        if content.get("command")=="open_drawer": return b"\x1b\x70\x00\x19\xfa"
     elif tipo=="test_page":
         ll+=["="*w,"   AGENTE LOCAL - TESTE OK!   ".center(w),"="*w,
              content.get("title","Teste"),content.get("message",""),
              f"Hora: {time.strftime('%d/%m/%Y %H:%M:%S')}","="*w]
     else:
         ll.append(f"JOB: {tipo}"); ll.append(json.dumps(content,ensure_ascii=False)[:200])
-    return "\n".join(ll)
+    return "\n".join(_quebrar_linhas_longas(ll, w))   # v5.80: linha maior que o papel quebra na palavra
 
 def _res_imp(pt):
     imps=cfg.get("impressoras",[])
@@ -2008,6 +2327,10 @@ def proc_job(job):
     jid=job.get("id"); pt=job.get("printer_type","receipt")
     pid=job.get("printer_id")
     content=job.get("content",{}); copies=int(job.get("copies",1)); jt=job.get("job_type","order")
+    # v5.78: garante content.created_at (UTC, do proprio print_job) como fonte do 'Data:'/'Hora:'
+    # em BRT quando o content nao traz created_at nem created_at_brt. Content existente por cima.
+    if isinstance(content, dict) and not content.get("created_at") and job.get("created_at"):
+        content = dict(content); content["created_at"] = job["created_at"]
 
     # NORMALIZACAO — o servidor pode mandar o job em 3 formatos:
     #   A) agent-unified-poll (legado): job.content.items[] com addons_json/price_cents (ingles cru)
@@ -2175,10 +2498,13 @@ def proc_job(job):
         except Exception as e:
             log.error(f"[PRINT] Erro ao decodificar ESC/POS: {e} — tentando imprimir como texto")
             dados = None
+    _fmt_ok = False   # v5.80: dados vieram do _fmt (e podem ser refeitos para outra impressora)
     if dados is None:
         # Formatacao NUNCA pode impedir a impressao. Se _fmt levantar excecao, imprime um cupom minimo.
         try:
-            dados=_fmt(content,jt,pt)
+            with _usar_codepage(_cp_da_impressora(imp)):
+                dados=_fmt(content,jt,pt,imp)   # imp: largura/codepage por impressora (v5.79/5.80)
+            _fmt_ok = True
         except Exception as e:
             # EXCECAO da regra acima: cupom fiscal nao tem "cupom minimo". Um papel com
             # "PEDIDO #99" no lugar do DANFE seria entregue ao cliente como se fosse a nota.
@@ -2215,8 +2541,22 @@ def proc_job(job):
     for _imp in imps_alvo:
         _nome = _imp.get("nome_impressora") or _imp.get("endereco_ip","")
         ok_imp = True
+        # v5.80: cada impressora com o SEU codepage e a SUA largura. Se diferem da primeira
+        # (usada no _fmt acima), formata de novo so para esta — senao a mini de 58 mm herdaria
+        # a tabela/largura da impressora do caixa.
+        _cp_imp = _cp_da_impressora(_imp)
+        _dados_imp = dados
+        if _fmt_ok and _imp is not imp and (
+                _cp_imp != _cp_da_impressora(imp) or
+                _largura_efetiva(_imp, content, _paper_width_servidor) != _largura_efetiva(imp, content, _paper_width_servidor)):
+            try:
+                with _usar_codepage(_cp_imp):
+                    _dados_imp = _fmt(content,jt,pt,_imp)
+            except Exception as e:
+                log.warning(f"[PRINT] Job {jid}: reformatar para '{_nome}' falhou ({e}); usando o da 1a impressora")
         for _ in range(copies):
-            r = _imprimir_com_roteamento(_imp, dados)
+            with _usar_codepage(_cp_imp):
+                r = _imprimir_com_roteamento(_imp, _dados_imp)
             if not r.get("ok"):
                 ok_imp = False
                 falhas_imp.append((_nome, r.get("erro","")))
@@ -2302,10 +2642,32 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.77"
+CURRENT_VERSION = "5.80"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
+
+def _popen_bat_orfao(bat):
+    """Roda um .bat FORA da arvore de processos do agente, sem janela.
+
+    POR QUE (v5.78): os bats de update/reparo/reinicio comecam com
+    'taskkill /F /FI "IMAGENAME eq AgenteLocal*" /T'. O /T mata a arvore inteira de cada
+    AgenteLocal — e, lancado como filho direto (Popen(["cmd","/c",bat])), o cmd do proprio bat
+    ESTAVA nessa arvore. Resultado: o bat morria no passo 1, sem copiar o exe novo e sem reabrir
+    o agente; ficavam update_apply.bat + update_lock.tmp na pasta e a loja SEM agente ate o
+    proximo login (reproduzido em 08/09/2026 com uma arvore falsa: filho direto = morre;
+    orfao = sobrevive). Isso tambem explica parte do "abre e fecha sozinho apos atualizar".
+
+    COMO: um cmd intermediario faz 'start "" /b cmd /c bat' e termina na hora. O cmd que roda o
+    bat fica orfao (pai ja morto) => fora de qualquer arvore que o taskkill enxergue.
+    So CREATE_NO_WINDOW (sem DETACHED_PROCESS): assim existe um console OCULTO herdado pelo bat,
+    que o 'timeout /t' precisa para esperar de verdade (sem console ele falha na hora e os
+    loops de retry/heartbeat do bat de update rodariam sem pausa)."""
+    return subprocess.Popen(
+        ["cmd", "/c", "start", "", "/b", "cmd", "/c", str(bat)],
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+
 
 def _bat_update(exe_novo: Path, exe_destino: Path, del_extra: str = "") -> str:
     """Gera o bat de update BLINDADO. Garantias:
@@ -2327,7 +2689,10 @@ def _bat_update(exe_novo: Path, exe_destino: Path, del_extra: str = "") -> str:
         f'echo 1>"{lock}"\r\n'
         # 1) Mata TODAS as instancias AgenteLocal* (inclui nomes versionados travados)
         '  taskkill /F /FI "IMAGENAME eq AgenteLocal*" /T >nul 2>&1\r\n'
-        "timeout /t 5 /nobreak >nul\r\n"
+        # 'ping -n N' = sleep de N-1 s que funciona SEM console. 'timeout /t' falha na hora quando
+        # o bat roda oculto (sem stdin de console) e os loops de retry/heartbeat abaixo rodariam
+        # sem pausa => rollback antes do exe novo subir. (Medido em 08/09/2026.)
+        "ping -n 6 127.0.0.1 >nul\r\n"
         # 2) Backup do exe atual (se existir) — rede de seguranca para rollback
         f'if exist "{d}" copy /y "{d}" "{backup}" >nul 2>&1\r\n'
         # 3) Limpa heartbeat antigo e aplica o novo por COPY com retry (max 10 = ~30s)
@@ -2338,7 +2703,7 @@ def _bat_update(exe_novo: Path, exe_destino: Path, del_extra: str = "") -> str:
         "if errorlevel 1 (\r\n"
         "  set /a TRIES+=1\r\n"
         "  if %TRIES% GEQ 10 goto :rollback\r\n"
-        "  timeout /t 3 /nobreak >nul\r\n"
+        "  ping -n 4 127.0.0.1 >nul\r\n"
         "  goto retry\r\n"
         ")\r\n"
         + del_extra +
@@ -2346,7 +2711,7 @@ def _bat_update(exe_novo: Path, exe_destino: Path, del_extra: str = "") -> str:
         f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{d}\'"\r\n'
         "set /a WAIT=0\r\n"
         ":waitboot\r\n"
-        "timeout /t 3 /nobreak >nul\r\n"
+        "ping -n 4 127.0.0.1 >nul\r\n"
         f'if exist "{heartbeat}" goto :ok\r\n'
         "set /a WAIT+=1\r\n"
         "if %WAIT% GEQ 10 goto :rollback\r\n"
@@ -2359,7 +2724,7 @@ def _bat_update(exe_novo: Path, exe_destino: Path, del_extra: str = "") -> str:
         # 6) ROLLBACK: novo nao subiu / copia falhou. Restaura backup e abre a versao antiga.
         ":rollback\r\n"
         f'taskkill /F /FI "IMAGENAME eq AgenteLocal*" /T >nul 2>&1\r\n'
-        "timeout /t 3 /nobreak >nul\r\n"
+        "ping -n 4 127.0.0.1 >nul\r\n"
         f'if exist "{backup}" copy /y "{backup}" "{d}" >nul 2>&1\r\n'
         f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{d}\'"\r\n'
         ":end\r\n"
@@ -2424,10 +2789,9 @@ def _baixar_e_aplicar_update(nova, url_nova):
         # Apagar o exe atual em execucao aqui era arriscado (podia deixar a loja sem exe).
         bat = BASE_DIR / "update_apply.bat"
         bat.write_text(_bat_update(exe_novo, exe_destino, ""), encoding="utf-8")
-        subprocess.Popen(
-            ["cmd", "/c", str(bat)],
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
-        )
+        # Orfao (fora da arvore do agente): ver _popen_bat_orfao — como filho direto o bat
+        # morria no proprio taskkill /T e o update NUNCA era aplicado.
+        _popen_bat_orfao(bat)
         log.info("[UPDATE] Aplicando atualizacao (bat blindado com rollback)...")
         sys.exit(0)
     except SystemExit:
@@ -2447,9 +2811,48 @@ def _baixar_e_aplicar_update(nova, url_nova):
             pass
         _update_em_andamento = False
 
+def _alvo_update(info):
+    """(versao, url) que este agente deve considerar como 'publicada'.
+    v5.78: le latest_version/latest_url ANTES de version/url. MOTIVO: ate a v5.77 o updater de
+    dentro do agente e quebrado (o bat morre no proprio taskkill /T) — QUALQUER mudanca em
+    'version' faz o agente <=5.77 se matar uma vez (loja sem agente) e depois ficar travado na
+    versao antiga (update_lock.tmp orfao). Por isso 'version'/'url' ficam CONGELADOS em 5.77
+    no version.json: os legados leem so eles, veem 'igual a minha' e nao fazem nada. Versoes
+    novas sao publicadas em latest_version/latest_url, que so >=5.78 entende. Clientes em
+    <=5.77 migram uma unica vez pelo ATUALIZAR_E_ABRIR_AGENTE.bat (que tambem le latest_*)."""
+    if not isinstance(info, dict): return "", ""
+    nova = str(info.get("latest_version") or info.get("version") or "").strip()
+    url  = str(info.get("latest_url") or info.get("url") or "").strip()
+    return nova, url
+
+_UPDATE_MAX_TENTATIVAS_24H = 2
+_update_bloqueado_avisado = False
+
+def _update_pode_tentar(nova):
+    """Teto do update automatico: no maximo 2 tentativas por versao-alvo a cada 24h. Contador
+    em DATA_DIR/update_tentativas.json (sobrevive a reinicios; zerado no boot da versao-alvo,
+    ver _auto_reparo_boot). Sem isto, um update que falha e faz rollback (antivirus segurando
+    o exe, disco cheio, exe corrompido no download) reiniciaria a loja a cada 5 min PARA SEMPRE
+    ("fica fechando e abrindo toda hora"). Retorna True e CONSOME uma tentativa; False = pare."""
+    p = DATA_DIR / "update_tentativas.json"
+    agora = time.time()
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(d, dict): d = {}
+    except Exception:
+        d = {}
+    if d.get("version") != nova or (agora - float(d.get("first", 0) or 0)) > 86400:
+        d = {"version": nova, "first": agora, "count": 0}
+    if int(d.get("count", 0) or 0) >= _UPDATE_MAX_TENTATIVAS_24H:
+        return False
+    d["count"] = int(d.get("count", 0) or 0) + 1
+    try: p.write_text(json.dumps(d), encoding="utf-8")
+    except Exception: pass
+    return True
+
 async def checar_atualizacao():
     """Verifica nova versao silenciosamente; download em thread para nao travar o poll."""
-    global _update_em_andamento
+    global _update_em_andamento, _update_bloqueado_avisado
     if not getattr(sys, "frozen", False):
         return
     if _update_em_andamento:
@@ -2468,9 +2871,28 @@ async def checar_atualizacao():
         req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
         with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx()) as r:
             info = json.loads(r.read())
-        nova = info.get("version", "")
-        url_nova = info.get("url", "")
+        nova, url_nova = _alvo_update(info)   # v5.78: latest_* antes de version/url
         if not nova or not url_nova or nova == CURRENT_VERSION:
+            return
+        # v5.78: NUNCA faz DOWNGRADE sozinho. Antes bastava 'nova != CURRENT_VERSION': um exe
+        # mais novo instalado a mao numa loja (ou em teste, antes de publicar o version.json)
+        # se "atualizava" para a versao publicada MAIS ANTIGA — e o bat de update derruba
+        # todo AgenteLocal* no processo. Rollback deliberado continua possivel: basta o
+        # version.json publicado trazer "allow_downgrade": true.
+        if _ver_tuple(nova) < _ver_tuple(CURRENT_VERSION) and not info.get("allow_downgrade"):
+            log.debug(f"[UPDATE] Publicada v{nova} e mais antiga que a minha v{CURRENT_VERSION}; "
+                      f"ignorando (sem allow_downgrade)")
+            return
+        # v5.78: teto de tentativas (2 por versao-alvo / 24h). Bloqueado => segura o lock de
+        # 5 min (senao voltaria aqui a cada poll) e avisa UMA vez por processo.
+        if not _update_pode_tentar(nova):
+            try: lock_file.write_text(str(time.time()))
+            except Exception: pass
+            if not _update_bloqueado_avisado:
+                _update_bloqueado_avisado = True
+                log.warning(f"[UPDATE] v{nova}: limite de {_UPDATE_MAX_TENTATIVAS_24H} tentativas em 24h "
+                            f"atingido; nao tento de novo ate amanha (evita ciclo fecha/abre). "
+                            f"Para forcar, use o ATUALIZAR_E_ABRIR_AGENTE.bat.")
             return
         # Marca tentativa de update no lock file
         try:
@@ -2668,12 +3090,22 @@ def _dashboard_aberto():
     except Exception:
         return False
 
+def _trazer_para_frente(w):
+    """Traz a janela pra frente DE VERDADE no Windows. deiconify+lift+focus_force nao bastam
+    quando outro app (PDV, navegador) tem o foco: o Windows ignora o pedido e a janela fica
+    atras — pro lojista, 'nao abriu'. Piscar -topmost e desligar em seguida resolve."""
+    try:
+        w.deiconify(); w.lift(); w.focus_force()
+        w.attributes("-topmost", True)
+        w.after(300, lambda: w.attributes("-topmost", False))
+    except Exception:
+        pass
+
 def abrir_dashboard():
     global _janela_dashboard
     # JANELA UNICA: se ja esta aberta, so traz pra frente em vez de empilhar outra.
     if _dashboard_aberto():
-        try: _janela_dashboard.deiconify(); _janela_dashboard.lift(); _janela_dashboard.focus_force()
-        except Exception: pass
+        _trazer_para_frente(_janela_dashboard)
         return
     w = tk.Toplevel(_root)
     w.title("Status - Concentrador")
@@ -2682,6 +3114,7 @@ def abrir_dashboard():
     w.resizable(True, True)
     w.lift(); w.focus_force()
     _janela_dashboard = w
+    _trazer_para_frente(w)
     w.bind("<Destroy>", lambda e: (globals().__setitem__('_janela_dashboard', None) if e.widget is w else None))
 
     tk.Label(w, text="Concentrador de Impressoes e Dispositivos",
@@ -2796,11 +3229,13 @@ def abrir_dashboard():
                 req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
                 with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx()) as r:
                     info = json.loads(r.read())
-                nova = info.get("version",""); url_nova = info.get("url","")
+                nova, url_nova = _alvo_update(info)   # v5.78: latest_* antes de version/url
                 if not nova or not url_nova:
                     w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
                                         messagebox.showwarning("Aviso","Nao foi possivel verificar atualizacao.",parent=w))); return
-                if nova == CURRENT_VERSION:
+                # v5.78: publicada mais ANTIGA que a minha nao e "nova versao" (sem allow_downgrade)
+                if nova == CURRENT_VERSION or (_ver_tuple(nova) < _ver_tuple(CURRENT_VERSION)
+                                               and not info.get("allow_downgrade")):
                     w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
                                         messagebox.showinfo("Atualizado",f"Voce ja esta na versao mais recente (v{CURRENT_VERSION}).",parent=w))); return
                 def _confirmar():
@@ -2836,7 +3271,7 @@ def abrir_dashboard():
                             # del_extra removido: o bat blindado ja limpa versionados com seguranca.
                             bat = BASE_DIR / "update_apply.bat"
                             bat.write_text(_bat_update(exe_novo, exe_destino, ""), encoding="utf-8")
-                            subprocess.Popen(["cmd","/c",str(bat)], creationflags=subprocess.CREATE_NO_WINDOW)
+                            _popen_bat_orfao(bat)   # fora da arvore do agente (ver _popen_bat_orfao)
                             log.info(f"[UPDATE] Atualizando para v{nova} via botao manual (validado {baixado} bytes)")
                             w.after(0, lambda: messagebox.showinfo("Atualizando",f"Atualizando para v{nova}...\nO agente vai reiniciar automaticamente.",parent=w))
                             w.after(500, sys.exit)
@@ -2974,15 +3409,21 @@ def abrir_dashboard():
                         i0 = imps_locais[0]; imp = i0
                         pt_uso = i0.get("printer_type","").strip() or i0.get("area","").strip() or pt_orig
                 if not imp and nome_imp_hist:
-                    imp = {"nome_impressora": nome_imp_hist, "tipo": "comum_win32"}
+                    # v5.80: reaproveita a entrada da config (mantem codepage/colunas da impressora)
+                    imp = next(({**i, "tipo": i.get("tipo") or "comum_win32"} for i in cfg.get("impressoras",[])
+                                if i.get("nome_impressora","") == nome_imp_hist),
+                               {"nome_impressora": nome_imp_hist, "tipo": "comum_win32"})
                     log.info(f"[REIMP] Usando impressora do historico: '{nome_imp_hist}'")
                 if not imp:
                     log.error("[REIMP] Nenhuma impressora disponivel neste PC")
                     w.after(0, lambda: messagebox.showerror("Erro","Nenhuma impressora configurada neste PC",parent=w)); return
                 nome_real = imp.get("nome_impressora") or imp.get("endereco_ip","")
                 log.info(f"[REIMP] Imprimindo em '{nome_real}' pt_uso='{pt_uso}'")
-                texto = _fmt(resp, pt_uso, pt_uso)
-                r = _imprimir_com_roteamento(imp, texto)
+                # v5.80: reimpressao com a tabela de acentos e a largura DA impressora (antes saia
+                # sempre em cp850/48, e uma mini configurada como utf8 reimprimia com letra errada)
+                with _usar_codepage(_cp_da_impressora(imp)):
+                    texto = _fmt(resp, pt_uso, pt_uso, imp)
+                    r = _imprimir_com_roteamento(imp, texto)
                 if r.get("ok"):
                     log.info(f"[REIMP] OK em '{nome_real}'")
                     w.after(0, lambda: messagebox.showinfo("OK",f"Reimpresso em:\n{nome_real}",parent=w))
@@ -3253,13 +3694,18 @@ def abrir_config(auto=False):
                 match=existente.get("nome_impressora","") if existente else ""
                 if not match:
                     match=next((x for x in iw if ns.upper()[:5] in x.upper() or x.upper()[:5] in ns.upper()),"")
-                icfg.append({"nome":ns,"area":area,"printer_type":ts,"nome_impressora":match,"tipo":"comum_win32","modo":"texto"})
+                _nova={"nome":ns,"area":area,"printer_type":ts,"nome_impressora":match,"tipo":"comum_win32","modo":"texto"}
+                # v5.80: ajustes feitos NA LOJA (colunas do papel, acentos) sobrevivem ao re-conectar
+                for _k in ("colunas","codepage"):
+                    if existente and existente.get(_k): _nova[_k]=existente[_k]
+                icfg.append(_nova)
             cfg["impressoras"]=icfg; salvar_config(cfg)
             sv2.set(f"Conectado: {d.get('restaurant_name','')}")
             for item in ti.get_children(): ti.delete(item)
             for imp in icfg:
                 tag="" if imp.get("nome_impressora") else "sem_map"
-                ti.insert("",tk.END,values=(imp["nome"],imp["area"],imp["nome_impressora"],imp["tipo"]),tags=(tag,))
+                ti.insert("",tk.END,values=(imp["nome"],imp["area"],imp["nome_impressora"],imp["tipo"],
+                                            str(imp.get("colunas") or ""), str(imp.get("codepage") or "")),tags=(tag,))
             messagebox.showinfo("OK",f"Restaurante: {d.get('restaurant_name','')}\nImpressoras: {len(printers)}\n\nClique DUPLO para mapear.",parent=w)
         else:
             sv2.set(f"Erro: {r.get('erro','')}"); messagebox.showerror("Erro",r.get("erro","Token invalido"),parent=w)
@@ -3295,10 +3741,11 @@ def abrir_config(auto=False):
     tk.Label(inf2,text="DUPLO CLIQUE em uma linha para editar a Impressora Windows.\nVermelho = sem mapeamento.  caixa=receipt | cozinha=kitchen | bar=bar",
              bg="#313244",fg="#a6c8e0",font=("Segoe UI",9),pady=6,wraplength=750,justify="left").pack()
 
-    cols=("nome","area","impressora_windows","tipo")
+    cols=("nome","area","impressora_windows","tipo","colunas","acentos")   # v5.79: colunas; v5.80: acentos
     ti=ttk.Treeview(f2,columns=cols,show="headings",height=9)
     for col,lbl,cw in [("nome","Nome Sistema",140),("area","Area",80),
-                        ("impressora_windows","Impressora Windows",300),("tipo","Tipo",100)]:
+                        ("impressora_windows","Impressora Windows",280),("tipo","Tipo",90),
+                        ("colunas","Colunas",65),("acentos","Acentos",70)]:
         ti.heading(col,text=lbl); ti.column(col,width=cw)
     sbi=ttk.Scrollbar(f2,orient="vertical",command=ti.yview); ti.configure(yscrollcommand=sbi.set)
     ti.grid(row=1,column=0,columnspan=5,padx=10,pady=5,sticky="nsew"); sbi.grid(row=1,column=5,pady=5,sticky="ns")
@@ -3328,7 +3775,8 @@ def abrir_config(auto=False):
         tag = _tag_impressora(imp)
         nome_w = imp.get("nome_impressora","") or ("(outro agente)" if tag == "outro_agente" else "")
         ti.insert("",tk.END,values=(imp.get("nome",""),imp.get("area",""),
-                                    nome_w, imp.get("tipo","comum_win32")),tags=(tag,))
+                                    nome_w, imp.get("tipo","comum_win32"),
+                                    str(imp.get("colunas") or ""), str(imp.get("codepage") or "")),tags=(tag,))
 
     ef2=tk.Frame(f2,bg="#2a2a3e",relief="ridge",bd=1); ef2.grid(row=2,column=0,columnspan=6,padx=10,pady=4,sticky="ew")
     tk.Label(ef2,text="Area:",bg="#2a2a3e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).grid(row=0,column=0,padx=(10,4),pady=10)
@@ -3336,12 +3784,28 @@ def abrir_config(auto=False):
     tk.Label(ef2,text="Impressora Windows:",bg="#2a2a3e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).grid(row=0,column=2,padx=4,pady=10)
     eiw=ttk.Combobox(ef2,values=iw,width=34); eiw.grid(row=0,column=3,padx=8,pady=10)
     lbe=tk.Label(ef2,text="<< Clique DUPLO em uma linha",bg="#2a2a3e",fg="#6c7086",font=("Segoe UI",8)); lbe.grid(row=0,column=4,padx=8)
+    # v5.79: colunas do papel POR IMPRESSORA (vazio = automatico: usa o que o cardapio configurou
+    # em 'Largura do Papel'; senao 48). Serve para corrigir na loja uma impressora de 42 colunas
+    # sem depender do servidor: com 48 o preco quebrava em duas linhas ("R$ 1" / "11.70").
+    tk.Label(ef2,text="Colunas do papel:",bg="#2a2a3e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).grid(row=1,column=0,columnspan=2,padx=(10,4),pady=(0,8),sticky="e")
+    ecol=ttk.Combobox(ef2,values=["","32","42","48"],width=6); ecol.grid(row=1,column=2,padx=4,pady=(0,8),sticky="w")
+    tk.Label(ef2,text="vazio = automatico   32 = 58 mm   42 = 76 mm   48 = 80 mm",
+             bg="#2a2a3e",fg="#6c7086",font=("Segoe UI",8)).grid(row=1,column=3,padx=4,pady=(0,8),sticky="w")
+    # v5.80: tabela de acentos POR IMPRESSORA (vazio = padrao do agente, cp850). Letra errada no
+    # papel (comum em mini impressora de 58 mm) => 'Testar acentos' e escolher o bloco certo.
+    tk.Label(ef2,text="Acentos:",bg="#2a2a3e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).grid(row=1,column=4,padx=4,pady=(0,8),sticky="e")
+    eacc=ttk.Combobox(ef2,values=[""]+list(_CP_TESTE),width=8); eacc.grid(row=1,column=5,padx=4,pady=(0,8),sticky="w")
+    tk.Label(ef2,text="Letra errada no papel? Clique 'Testar acentos', veja qual bloco saiu certo e escolha esse em Acentos. "
+                      "'ascii' tira os acentos e funciona em qualquer impressora.",
+             bg="#2a2a3e",fg="#6c7086",font=("Segoe UI",8),wraplength=760,justify="left").grid(row=2,column=0,columnspan=6,padx=10,pady=(0,8),sticky="w")
 
     def duplo(e):
         sel=ti.selection()
         if not sel: return
         vals=ti.item(sel[0],"values"); lbe.config(text=f"Editando: {vals[0]}",fg="#89b4fa")
         earea.set(vals[1] if len(vals)>1 else "")
+        ecol.set(vals[4] if len(vals)>4 else "")
+        eacc.set(vals[5] if len(vals)>5 else "")
         eiw.set(vals[2] if len(vals)>2 else ""); eiw.focus()
 
     def aplicar():
@@ -3349,25 +3813,36 @@ def abrir_config(auto=False):
         if not sel: messagebox.showwarning("Aviso","Clique duplo em uma linha!",parent=w); return
         nova=eiw.get().strip(); nova_area=earea.get().strip()
         if not nova: messagebox.showwarning("Aviso","Selecione a Impressora Windows!",parent=w); return
+        col_txt=ecol.get().strip()
+        if col_txt and not _colunas_validas(col_txt):
+            messagebox.showwarning("Aviso","Colunas do papel: use 32, 42 ou 48 (ou deixe vazio).",parent=w); return
+        acc_txt=eacc.get().strip().lower()
+        if acc_txt and not _normaliza_cp(acc_txt):
+            messagebox.showwarning("Aviso",f"Acentos: use uma destas opcoes: {', '.join(_CP_TESTE)} (ou deixe vazio).",parent=w); return
+        acc_txt=_normaliza_cp(acc_txt)
         vals=ti.item(sel[0],"values")
         area_final = nova_area or vals[1]
-        ti.item(sel[0],values=(vals[0],area_final,nova,vals[3]),tags=("",))
-        lbe.config(text=f"OK: {vals[0]} -> {nova}",fg="#a6e3a1"); eiw.set(""); earea.set("")
+        ti.item(sel[0],values=(vals[0],area_final,nova,vals[3],col_txt,acc_txt),tags=("",))
+        lbe.config(text=f"OK: {vals[0]} -> {nova}",fg="#a6e3a1"); eiw.set(""); earea.set(""); ecol.set(""); eacc.set("")
         # Salva imediatamente no cfg e no disco
         nome_sistema = vals[0]
         for imp in cfg.get("impressoras",[]):
             if imp.get("nome") == nome_sistema:
                 imp["nome_impressora"] = nova
                 if nova_area: imp["area"] = nova_area
+                if col_txt: imp["colunas"] = _colunas_validas(col_txt)
+                else: imp.pop("colunas", None)
+                if acc_txt: imp["codepage"] = acc_txt
+                else: imp.pop("codepage", None)
                 break
         salvar_config(cfg)
-        log.info(f"[CONFIG] Impressora '{nome_sistema}' area={area_final} -> '{nova}'")
+        log.info(f"[CONFIG] Impressora '{nome_sistema}' area={area_final} -> '{nova}' colunas={col_txt or 'auto'} acentos={acc_txt or 'padrao'}")
 
     ti.bind("<Double-1>",duplo)
     tk.Button(ef2,text="Aplicar",command=aplicar,bg="#89b4fa",fg="#1e1e2e",
               font=("Segoe UI",9,"bold"),relief="flat",padx=14,pady=6,cursor="hand2").grid(row=0,column=5,padx=8)
 
-    fi2=ttk.Frame(f2); fi2.grid(row=3,column=0,columnspan=6,padx=10,pady=4,sticky="ew")
+    fi2=ttk.Frame(f2); fi2.grid(row=3,column=0,columnspan=6,padx=10,pady=4,sticky="ew")   # (ef2 cresceu por dentro; grid externo inalterado)
     ttk.Label(fi2,text="Novo:").grid(row=0,column=0,padx=4,pady=6)
     en=ttk.Entry(fi2,width=14); en.grid(row=0,column=1,padx=4)
     ttk.Label(fi2,text="Area:").grid(row=0,column=2,padx=4)
@@ -3378,7 +3853,7 @@ def abrir_config(auto=False):
     def add_i():
         n=en.get().strip(); ww=ead.get().strip()
         if not n or not ww: messagebox.showwarning("Aviso","Preencha Nome e Impressora!",parent=w); return
-        ti.insert("",tk.END,values=(n,ea.get().strip(),ww,"comum_win32"))
+        ti.insert("",tk.END,values=(n,ea.get().strip(),ww,"comum_win32","",""))
         en.delete(0,tk.END); ead.set("")
 
     def rem_i():
@@ -3388,13 +3863,33 @@ def abrir_config(auto=False):
     def tst_i():
         sel=ti.selection()
         if not sel: messagebox.showwarning("Aviso","Selecione uma impressora!",parent=w); return
-        nw=ti.item(sel[0],"values")[2]
+        vals=ti.item(sel[0],"values")
+        nw=vals[2] if len(vals)>2 else ""
         if not nw: messagebox.showwarning("Aviso","Mapeie a Impressora Windows!\nClique DUPLO na linha.",parent=w); return
         txt2=("="*W+"\n"+f"  {cfg.get('restaurant_name','AGENTE LOCAL')}  ".center(W)+"\n"+
               "  TESTE DE IMPRESSAO OK!  ".center(W)+"\n"+"="*W+"\n"+
               f"Impressora: {nw}\n"+f"Hora: {time.strftime('%d/%m/%Y %H:%M:%S')}\n"+"="*W+"\n")
-        r=_imprimir_raw(nw,txt2)
+        # v5.80: com a tabela de acentos DA LINHA (a mesma que os pedidos usam nessa impressora)
+        with _usar_codepage(_cp_da_impressora({"codepage": vals[5] if len(vals)>5 else ""})):
+            r=_imprimir_raw(nw,txt2)
         if r.get("ok"): messagebox.showinfo("OK",f"Teste enviado:\n{nw}",parent=w)
+        else: messagebox.showerror("Erro",r.get("erro",""),parent=w)
+
+    def tst_acentos():
+        """v5.80: imprime a pagina de teste de acentos na impressora selecionada."""
+        sel=ti.selection()
+        if not sel: messagebox.showwarning("Aviso","Selecione uma impressora!",parent=w); return
+        vals=ti.item(sel[0],"values")
+        alvo=next((dict(i) for i in cfg.get("impressoras",[]) if i.get("nome")==vals[0]), None) \
+             or {"nome":vals[0],"nome_impressora":vals[2],"tipo":vals[3] if len(vals)>3 else "comum_win32"}
+        if not (alvo.get("nome_impressora") or alvo.get("endereco_ip")):
+            messagebox.showwarning("Aviso","Mapeie a Impressora Windows!\nClique DUPLO na linha.",parent=w); return
+        r=_imprimir_com_roteamento(alvo,_bytes_teste_acentos())
+        if r.get("ok"):
+            messagebox.showinfo("Teste de acentos",
+                "Teste enviado.\n\nVeja no papel qual bloco (1 a 6) saiu com os acentos CERTOS, "
+                "de clique DUPLO nesta impressora e escolha essa opcao em 'Acentos'. Depois clique Aplicar.\n\n"
+                "Se nenhum saiu certo, escolha 'ascii'.",parent=w)
         else: messagebox.showerror("Erro",r.get("erro",""),parent=w)
 
     def sync_e_recarregar():
@@ -3405,14 +3900,16 @@ def abrir_config(auto=False):
                 for imp in cfg.get("impressoras",[]):
                     tag="" if imp.get("nome_impressora") else "sem_map"
                     ti.insert("",tk.END,values=(imp.get("nome",""),imp.get("area",""),
-                                                imp.get("nome_impressora",""),imp.get("tipo","comum_win32")),tags=(tag,))
+                                                imp.get("nome_impressora",""),imp.get("tipo","comum_win32"),
+                                                str(imp.get("colunas") or ""), str(imp.get("codepage") or "")),tags=(tag,))
                 messagebox.showinfo("Sincronizado","Impressoras atualizadas do servidor!",parent=w)
             w.after(0,_ui)
         threading.Thread(target=_do, daemon=True).start()
 
     bi2=tk.Frame(f2,bg="#1e1e2e"); bi2.grid(row=4,column=0,columnspan=6,padx=10,pady=6,sticky="w")
     for tb,cb,cor in [("+ Adicionar",add_i,"#a6e3a1"),("Remover",rem_i,"#f38ba8"),
-                       ("Testar Impressao",tst_i,"#cba6f7"),("Sincronizar",sync_e_recarregar,"#fab387"),
+                       ("Testar Impressao",tst_i,"#cba6f7"),("Testar acentos",tst_acentos,"#94e2d5"),
+                       ("Sincronizar",sync_e_recarregar,"#fab387"),
                        ("Ver Log",abrir_log,"#6c7086")]:
         tk.Button(bi2,text=tb,command=cb,bg=cor,fg="#1e1e2e",font=("Segoe UI",9,"bold"),
                   relief="flat",padx=10,pady=5,cursor="hand2").pack(side="left",padx=4)
@@ -3439,9 +3936,9 @@ def abrir_config(auto=False):
     # Controle de largura do papel: quando o servidor nao manda paper_width no job, o cupom
     # cai no default de 48 colunas (80mm). Loja com bobina de 58mm precisa deste ajuste local
     # na instalacao, senao separadores/comanda saem largos demais para o papel (COMP-46).
-    _LARGURAS_PAPEL = [("58mm",32), ("80mm",48)]
+    _LARGURAS_PAPEL = [("58mm",32), ("76mm",42), ("80mm",48)]   # v5.79: + 42 colunas (cabeca de 512 pontos)
     _pw_atual = int(cfg.get("paper_width_cols") or W)
-    _pw_idx0 = 0 if _pw_atual <= 32 else 1
+    _pw_idx0 = min(range(len(_LARGURAS_PAPEL)), key=lambda i: abs(_LARGURAS_PAPEL[i][1] - _pw_atual))
     tk.Frame(bi2,bg="#1e1e2e",width=20).pack(side="left")
     tk.Label(bi2,text="Papel:",bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).pack(side="left",padx=(0,4))
     _pw_var = tk.IntVar(value=_pw_idx0)
@@ -3943,11 +4440,16 @@ def abrir_config(auto=False):
         for item in ti.get_children():
             v=ti.item(item,"values")
             nome=v[0]; area=v[1]; nome_win=v[2]; tipo=v[3]
+            colunas=_colunas_validas(v[4]) if len(v)>4 else None   # v5.79: largura do papel por impressora
+            codepage=_normaliza_cp(v[5]) if len(v)>5 else ""        # v5.80: tabela de acentos por impressora
             orig = imps_orig.get(nome.strip().lower(), {})
             # printer_type vem do servidor (via config original), area e derivada dele
             printer_type = orig.get("printer_type") or {"caixa":"receipt","cozinha":"kitchen","bar":"bar"}.get(area.strip().lower(), "receipt")
             area_correta = {"receipt":"caixa","kitchen":"cozinha","bar":"bar"}.get(printer_type, area)
-            imps.append({"nome":nome,"area":area_correta,"nome_impressora":nome_win,"tipo":tipo,"modo":"texto","printer_type":printer_type})
+            _imp_novo={"nome":nome,"area":area_correta,"nome_impressora":nome_win,"tipo":tipo,"modo":"texto","printer_type":printer_type}
+            if colunas: _imp_novo["colunas"]=colunas
+            if codepage: _imp_novo["codepage"]=codepage
+            imps.append(_imp_novo)
         cfg["impressoras"]=imps; bals=[]
         for item in tb2.get_children():
             v=tb2.item(item,"values"); n2,t2,c3,b2=v[0],v[1],v[2],v[3]
@@ -4023,13 +4525,12 @@ def reiniciar_app():
     bat = BASE_DIR / "restart.bat"
     bat.write_text(
         "@echo off\r\n"
-        "timeout /t 2 /nobreak >nul\r\n"
+        "ping -n 3 127.0.0.1 >nul\r\n"
         f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe}\'"\r\n'
         'del "%~f0"\r\n',
         encoding="utf-8"
     )
-    subprocess.Popen(["cmd", "/c", str(bat)],
-                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+    _popen_bat_orfao(bat)   # fora da arvore do agente: o bat sobrevive ao proprio taskkill /T
     os._exit(0)
 
 
@@ -4051,13 +4552,12 @@ def reparar_agente():
     bat.write_text(
         "@echo off\r\n"
         'taskkill /F /FI "IMAGENAME eq AgenteLocal*" /T >nul 2>&1\r\n'
-        "timeout /t 3 /nobreak >nul\r\n"
+        "ping -n 4 127.0.0.1 >nul\r\n"
         f'powershell -WindowStyle Hidden -Command "Start-Process -FilePath \'{exe}\'"\r\n'
         'del "%~f0"\r\n',
         encoding="utf-8"
     )
-    subprocess.Popen(["cmd", "/c", str(bat)],
-                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+    _popen_bat_orfao(bat)   # fora da arvore do agente: o bat sobrevive ao proprio taskkill /T
     os._exit(0)
 
 
@@ -4186,6 +4686,16 @@ def iniciar_tray():
     _tray_icon.run()
 
 def _check():
+    # v5.78: pedido "abrir janela" de uma copia nova (lojista clicou no .exe com o agente ja
+    # rodando na bandeja). Consumir = apagar o arquivo (a copia nova espera isso p/ encerrar).
+    try:
+        if SHOW_FLAG.exists():
+            try: SHOW_FLAG.unlink()
+            except Exception: pass
+            log.info("[GUI] Pedido de abrir janela recebido (clique no .exe); mostrando painel de Status")
+            abrir_dashboard()
+    except Exception as e:
+        log.debug(f"[GUI] SHOW_FLAG: {e}")
     try:
         cmd = _gui_queue.get_nowait()
         try:
@@ -4298,6 +4808,7 @@ def _escrever_registro_instancia():
             "version": str(CURRENT_VERSION),
             "exe": str(sys.executable),
             "hb": time.time(),
+            "since": _start_time,   # v5.78: quando esta instancia subiu (desempate + deteccao de clique manual)
         }), encoding="utf-8")
     except Exception:
         pass
@@ -4332,20 +4843,83 @@ def _matar_pid(pid):
         return False
 
 
+def _since_registro(rec):
+    """'since' do registro como float; ausente/ilegivel => +inf (conta como a MAIS NOVA,
+    ou seja, perde o desempate — nunca derruba uma instancia que se declarou mais antiga)."""
+    try:
+        s = float((rec or {}).get("since") or 0)
+        return s if s > 0 else float("inf")
+    except Exception:
+        return float("inf")
+
+
 def _decidir_vencedor(registros):
-    """Funcao PURA (testavel): dado {pid: {"version": ...}}, devolve o pid vencedor.
-    Regra: MAIOR versao vence; empate => MENOR pid. Como todas as instancias olham os
-    mesmos registros, todas chegam ao MESMO vencedor -> exatamente uma sobrevive."""
+    """Funcao PURA (testavel): dado {pid: {"version": ..., "since": ...}}, devolve o pid
+    vencedor. Regra: MAIOR versao vence; empate => instancia MAIS ANTIGA (menor 'since',
+    v5.78+); ultimo desempate => MENOR pid. Como todas as instancias olham os mesmos
+    registros, todas chegam ao MESMO vencedor -> exatamente uma sobrevive.
+    POR QUE 'mais antiga' no empate (e nao so menor pid): o Windows REUSA pids, entao com
+    'menor pid' a copia NOVA (clique do lojista no .exe) vencia ~metade das vezes e MATAVA o
+    agente que estava trabalhando, reiniciando-o a toa. Com 'mais antiga vence', o clique
+    nunca derruba o agente em producao: a copia nova so pede pra ele mostrar a janela.
+    Compatibilidade: registros sem 'since' (<=v5.77) so empatam entre si (mesma versao),
+    e ai caem no criterio antigo (menor pid) — comportamento identico ao de antes."""
     vencedor = None
     for p in registros:
         if vencedor is None:
             vencedor = p
             continue
-        vp = _ver_tuple(registros[p].get("version"))
-        vw = _ver_tuple(registros[vencedor].get("version"))
-        if vp > vw or (vp == vw and p < vencedor):
+        rp, rw = registros[p], registros[vencedor]
+        vp, vw = _ver_tuple(rp.get("version")), _ver_tuple(rw.get("version"))
+        if vp > vw:
             vencedor = p
+        elif vp == vw:
+            sp, sw = _since_registro(rp), _since_registro(rw)
+            if sp < sw or (sp == sw and p < vencedor):
+                vencedor = p
     return vencedor
+
+
+_MANUAL_MIN_IDADE_S = 60      # instancia rodando ha mais que isso ja estava "em producao"
+_abrir_janela_no_boot = False  # setado pela eleicao; o main abre o painel ao terminar de subir
+
+
+def _idade_instancia(pid, rec):
+    """Ha quantos segundos a instancia 'pid' esta rodando. Usa o 'since' do registro
+    (v5.78+); p/ registro de versao antiga (sem 'since') usa a data de CRIACAO do arquivo
+    de registro (no Windows st_ctime = criacao; o heartbeat so reescreve, nao recria).
+    Desconhecido => 0 (trata como recem-nascida: nunca dispara janela por engano)."""
+    try:
+        s = float((rec or {}).get("since") or 0)
+        if s > 0:
+            return max(0.0, time.time() - s)
+    except Exception:
+        pass
+    try:
+        return max(0.0, time.time() - (INSTANCES_DIR / f"{pid}.json").stat().st_ctime)
+    except Exception:
+        return 0.0
+
+
+def _pedir_janela_e_esperar(pid_vencedor, timeout_s=4.0):
+    """Escreve o SHOW_FLAG pedindo a instancia vencedora que mostre o painel e espera ela
+    CONSUMIR o pedido (apagar o arquivo). Consumir prova que ela esta viva E com a GUI
+    respondendo. Retorna True se consumiu. Se nao consumiu, limpa o pedido (um flag orfao
+    faria o painel abrir sozinho num boot futuro) e retorna False."""
+    try:
+        SHOW_FLAG.write_text(json.dumps({"de": os.getpid(), "para": pid_vencedor,
+                                         "ts": time.time()}), encoding="utf-8")
+    except Exception as e:
+        log.debug(f"[ELEICAO] nao consegui escrever SHOW_FLAG: {e}")
+        return False
+    fim = time.time() + timeout_s
+    while time.time() < fim:
+        time.sleep(0.2)
+        if not SHOW_FLAG.exists():
+            return True
+    try: SHOW_FLAG.unlink()
+    except Exception: pass
+    return False
 
 
 def _eleger_instancia_unica(motivo="boot"):
@@ -4357,6 +4931,7 @@ def _eleger_instancia_unica(motivo="boot"):
         So mato/assumo se a 'vencedora' estiver morta/pendurada. Assim ZERO instancias e
         impossivel (fim do 'nao abre') e as duplicatas colapsam mesmo assim.
     Retorna True se esta instancia deve continuar. So age em modo frozen (.exe real)."""
+    global _abrir_janela_no_boot
     if not getattr(sys, "frozen", False):
         return True
     if not _eleicao_lock.acquire(blocking=False):
@@ -4395,7 +4970,7 @@ def _eleger_instancia_unica(motivo="boot"):
                     registros[pid] = rec
             # garante o meu proprio registro no mapa
             registros.setdefault(meu_pid, {"pid": meu_pid, "version": str(CURRENT_VERSION),
-                                           "hb": time.time()})
+                                           "hb": time.time(), "since": _start_time})
             # PIDs vivos que ainda nao publicaram registro (recem-lancados). No boot,
             # espera e re-scaneia — pode ser uma versao MAIS NOVA subindo.
             desconhecidos = [p for p in vivos if p not in registros]
@@ -4418,6 +4993,15 @@ def _eleger_instancia_unica(motivo="boot"):
                 # de fora, mas some sozinho: matar o app-filho faz o bootloader-pai encerrar.
                 outras = [p for p in registros
                           if p != meu_pid and p != os.getppid()]
+                # v5.78: se estou derrubando uma instancia que ja rodava ha um tempo (>60s),
+                # isto NAO e o auto-start duplicado do login (as duas sobem juntas, com
+                # segundos de diferenca): alguem abriu o .exe de novo (ex.: um exe mais novo
+                # por cima do antigo). Quem clicou espera VER algo -> abro o painel ao
+                # terminar de subir. (Avaliado ANTES de apagar os registros: a idade pode vir
+                # da data de criacao do arquivo.)
+                if motivo == "boot" and any(_idade_instancia(p, registros[p]) > _MANUAL_MIN_IDADE_S
+                                            for p in outras):
+                    _abrir_janela_no_boot = True
                 for p in outras:
                     _matar_pid(p)
                     try: (INSTANCES_DIR / f"{p}.json").unlink()
@@ -4444,6 +5028,25 @@ def _eleger_instancia_unica(motivo="boot"):
                 log.info(f"[ELEICAO/{motivo}] Existe instancia vencedora pid={vencedor} "
                          f"v{rec.get('version')}; sigo rodando (ela colapsa duplicatas). "
                          f"eu=pid{meu_pid} v{CURRENT_VERSION}")
+                # v5.78: a vencedora ja roda ha >60s => isto e o lojista clicando no .exe com
+                # o agente na bandeja ("esta no gerenciador de tarefas mas nao abre"). Peco a
+                # ela que MOSTRE o painel. Se ela consumir o pedido (prova de que esta viva E
+                # com a GUI respondendo), encerro esta copia em silencio: nao ha razao pra
+                # ficar 15s duplicado (2o icone na bandeja) ate o watchdog dela me matar.
+                # Se NAO consumir em 4s, vale a regra de ouro: sigo rodando.
+                if motivo == "boot" and _idade_instancia(vencedor, rec) > _MANUAL_MIN_IDADE_S:
+                    if _pedir_janela_e_esperar(vencedor):
+                        log.info(f"[ELEICAO/boot] Vencedora pid={vencedor} mostrou o painel; "
+                                 f"encerro esta copia extra (pid={meu_pid}).")
+                        try:
+                            if _meu_registro_path and _meu_registro_path.exists():
+                                _meu_registro_path.unlink()
+                        except Exception:
+                            pass
+                        logging.shutdown()
+                        os._exit(0)
+                    log.info(f"[ELEICAO/boot] Vencedora pid={vencedor} nao respondeu ao pedido "
+                             f"de janela em 4s; sigo rodando (eleicao decide).")
                 return True
             else:
                 # Vencedora aparente NAO esta saudavel (morta/pendurada): assumo o posto.
@@ -4618,7 +5221,18 @@ if __name__ == "__main__":
         _root.withdraw()
     _root.protocol("WM_DELETE_WINDOW", _on_close)
 
+    # v5.78: um SHOW_FLAG que sobrou de antes (a vencedora morreu sem consumir) e lixo — se
+    # ficasse, o painel abriria sozinho no proximo login. Um pedido legitimo so e escrito
+    # para uma instancia que JA passou deste ponto, entao apagar aqui nunca perde pedido.
+    try:
+        if SHOW_FLAG.exists(): SHOW_FLAG.unlink()
+    except Exception:
+        pass
     _root.after(300, _check)
+    if _abrir_janela_no_boot:
+        # Substitui uma instancia que ja rodava (alguem abriu o .exe de novo): mostra o painel.
+        log.info("[GUI] Substitui uma instancia que ja rodava (clique no .exe); abrindo painel de Status")
+        _root.after(1500, abrir_dashboard)
 
     # Inicia systray em thread separada
     threading.Thread(target=iniciar_tray, daemon=True).start()
