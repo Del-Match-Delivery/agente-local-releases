@@ -95,7 +95,9 @@ $baseF = Join-Path $dir 'base.sha'
 $titF  = Join-Path $dir 'title.txt'
 $titulo = "v$ver"; if (Test-Path $titF) { $titulo = (Get-Content $titF -Raw -Encoding UTF8).Trim() }
 if ($Hotfix) { $branch = "hotfix/$Chave-agente-$ver" } else { $branch = "fix/$Chave-agente-$ver" }
-$tituloPr = "[$Chave] Agente Local ${tag}: acentos por impressora, largura do papel, AGENDADO, hora BRT"
+# Titulo do PR sai do title.txt da release (sem o prefixo "vX.Y - "), nao de texto fixo:
+# na v5.81 o texto fixo da v5.80 teria saido no PR errado.
+$tituloPr = "[$Chave] Agente Local ${tag}: " + ($titulo -replace '^v[0-9.]+\s*-\s*', '')
 
 # arquivos que vao no PR (caminho no repo -> arquivo local)
 $arquivos = [ordered]@{
@@ -142,7 +144,7 @@ function Corpo-Pr {
 Release publicada (exe TESTADO): https://github.com/$repo/releases/tag/$tag
 AgenteLocal.exe sha256 ``$hashEsp``
 
-Este PR traz para o repositorio o **codigo-fonte** que gerou o exe (merge da v5.78/5.79 com o COMP-46 que ja estava na develop: EAN-13 + largura local), o ``version.json`` apontando ``latest_*`` para $tag e os testes em ``tests/``. $(if ($tagCommit) { "A tag $tag aponta para o commit $tagCommit (codigo-fonte que gerou o exe)." } else { "A tag $tag aponta para o commit mais recente desta branch." })
+Este PR traz para o repositorio o **codigo-fonte** que gerou o exe (base: o agente_local.py que ja estava na develop, sha em ``release_$ver\base.sha``), o ``version.json`` apontando ``latest_*`` para $tag e os testes em ``tests/``. $(if ($tagCommit) { "A tag $tag aponta para o commit $tagCommit (codigo-fonte que gerou o exe)." } else { "A tag $tag aponta para o commit mais recente desta branch." })
 
 **Os agentes so passam a ver a $tag quando este ``version.json`` chegar na main** (develop -> staging -> main). ``version`` continua 5.77 de proposito: ver ``_REGRA_DE_PUBLICACAO`` dentro do arquivo.
 
@@ -153,6 +155,7 @@ venv_build\Scripts\python.exe tests\test_agendado.py
 venv_build\Scripts\python.exe tests\test_hora.py
 venv_build\Scripts\python.exe tests\test_codepage.py
 venv_build\Scripts\python.exe tests\test_ui_config.py
+venv_build\Scripts\python.exe tests\test_fonte.py
 ``````
 
 ### Notas da versao

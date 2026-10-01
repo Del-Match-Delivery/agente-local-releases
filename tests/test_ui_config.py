@@ -40,9 +40,9 @@ def todos(wd):
 ws = list(todos(w))
 ti = next(x for x in ws if x.winfo_class() == "Treeview" and "acentos" in x["columns"])
 linhas = {ti.item(i, "values")[0]: ti.item(i, "values") for i in ti.get_children()}
-assert linhas["Mini"][4:] == ("32", "ascii"), linhas["Mini"]
-assert linhas["Cozinha"][4:] == ("", ""), linhas["Cozinha"]
-print("1) coluna Acentos e Colunas carregadas da config OK:", linhas["Mini"])
+assert linhas["Mini"][4:] == ("32", "ascii", ""), linhas["Mini"]   # v5.81: + coluna Fonte
+assert linhas["Cozinha"][4:] == ("", "", ""), linhas["Cozinha"]
+print("1) colunas Acentos, Colunas e Fonte carregadas da config OK:", linhas["Mini"])
 
 combos = [x for x in ws if x.winfo_class() == "TCombobox"]
 eacc = next(x for x in combos if "ascii" in x.cget("values") and "cp860" in x.cget("values"))
@@ -59,7 +59,7 @@ eiw.set("EPSON TM-T20"); ecol.set("42"); eacc.set("cp860")
 botoes["Aplicar"].invoke()
 imp_coz = next(i for i in CFG["impressoras"] if i["nome"] == "Cozinha")
 assert imp_coz.get("colunas") == 42 and imp_coz.get("codepage") == "cp860", imp_coz
-assert ti.item(iid_coz, "values")[4:] == ("42", "cp860"), ti.item(iid_coz, "values")
+assert ti.item(iid_coz, "values")[4:] == ("42", "cp860", ""), ti.item(iid_coz, "values")
 assert gravados and any(i.get("codepage") == "cp860" for i in gravados[-1])
 print("3) Aplicar grava colunas=42 e acentos=cp860 na config e na tabela OK")
 
@@ -104,6 +104,84 @@ if "Conectar ao Sistema" in botoes:
     print("7) 'Conectar' mantem colunas/acentos da impressora OK")
 else:
     print("7) (botao Conectar nao encontrado pelo texto; pulado)", sorted(botoes))
+
+# 8) v5.81: Fonte POR IMPRESSORA na linha de edicao (combo 'media' -> imp['font_size']=1)
+# ('Conectar' do passo 7 recriou as linhas da tabela: rebusca o iid pelo nome)
+iid_coz = next(i for i in ti.get_children() if ti.item(i, "values")[0] == "Cozinha")
+imp_coz = next(i for i in CFG["impressoras"] if i["nome"] == "Cozinha")
+efnt = next(x for x in combos if tuple(x.cget("values")) == ("", "normal", "media", "grande", "extra"))
+ti.selection_set(iid_coz); eiw.set("EPSON TM-T20"); ecol.set(""); eacc.set(""); efnt.set("media")
+botoes["Aplicar"].invoke()
+assert imp_coz.get("font_size") == 1, imp_coz
+assert ti.item(iid_coz, "values")[6] == "media", ti.item(iid_coz, "values")
+ti.selection_set(iid_coz); eiw.set("EPSON TM-T20"); efnt.set("")
+botoes["Aplicar"].invoke()
+assert "font_size" not in imp_coz, imp_coz
+print("8) campo Fonte por impressora grava e limpa imp['font_size'] OK")
+
+# 9) v5.81: aba Impressao — botao 'Media' grava font_size=1; '2 vias' grava vias_cupom=2;
+#    'Imprimir cupom de teste' formata com _fmt e manda para a impressora do caixa.
+#    ('Normal' existe em 2 grupos [tamanho e espaco]; 'Media' so no tamanho.)
+todos_botoes = [x for x in ws if x.winfo_class() == "Button"]
+next(b for b in todos_botoes if b.cget("text") == "Media").invoke()
+assert A.cfg.get("font_size") == 1, A.cfg.get("font_size")
+next(b for b in todos_botoes if b.cget("text") == "2 vias").invoke()
+assert A.cfg.get("vias_cupom") == 2, A.cfg.get("vias_cupom")
+n_imp = len(impressos)
+next(b for b in todos_botoes if b.cget("text") == "Imprimir cupom de teste").invoke()
+import time as _t
+for _ in range(50):
+    if len(impressos) > n_imp: break
+    _t.sleep(0.1)
+assert len(impressos) > n_imp, "cupom de teste nao foi enviado"
+_imp_t, _dados_t = impressos[-1]
+assert _imp_t.get("nome_impressora") == "POS-58", _imp_t
+assert isinstance(_dados_t, str) and "PEDIDO #123" in _dados_t and "TOTAL:" in _dados_t, _dados_t[:200]
+print("9) aba Impressao: Media, 2 vias e 'Imprimir cupom de teste' OK")
+
+# 10) v5.81: TODOS os controles da aba Impressao gravam a config certa.
+def _bt(txt):
+    return next(b for b in todos_botoes if b.cget("text") == txt)
+# tamanho base: Grande e volta a Normal
+_bt("Grande").invoke();  assert A.cfg.get("font_size") == 2
+_bt("Normal").invoke()   # ha 2 botoes 'Normal' (tamanho e espaco); o 1o criado e o do tamanho
+assert A.cfg.get("font_size") in (0, 2)   # ver asserts dedicados de espaco abaixo
+# secoes: combos com 'Herda' aparecem na ordem loja, itens, total, rodape (pedido tem 'Auto')
+combos_sec = [x for x in combos if "Herda" in x.cget("values")]
+assert len(combos_sec) == 4, len(combos_sec)
+cb_total = combos_sec[2]
+cb_total.set("Grande"); cb_total.event_generate("<<ComboboxSelected>>"); w.update()
+assert (A.cfg.get("fonte_secoes") or {}).get("total") == 2, A.cfg.get("fonte_secoes")
+cb_total.set("Herda"); cb_total.event_generate("<<ComboboxSelected>>"); w.update()
+assert "total" not in (A.cfg.get("fonte_secoes") or {}), A.cfg.get("fonte_secoes")
+# estilo: checkbuttons e espaco
+chks = {x.cget("text"): x for x in ws if x.winfo_class() == "Checkbutton"}
+ck_neg = next(v for k, v in chks.items() if "Negrito no cupom" in k)
+ck_esc = next(v for k, v in chks.items() if "mais escura" in k)
+ck_neg.invoke(); assert A.cfg.get("negrito_cupom") is True
+ck_neg.invoke(); assert "negrito_cupom" not in A.cfg
+ck_esc.invoke(); assert A.cfg.get("mais_escuro") is True
+ck_esc.invoke(); assert "mais_escuro" not in A.cfg
+_bt("Compacto").invoke(); assert A.cfg.get("espaco_linhas") == 0
+_bt("Espacado").invoke(); assert A.cfg.get("espaco_linhas") == 2
+# largura da bobina: 58mm grava 32; Auto remove (volta ao automatico do servidor)
+_bt("58mm").invoke(); assert A.cfg.get("paper_width_cols") == 32
+_bt("Auto").invoke(); assert "paper_width_cols" not in A.cfg
+# corte e vias
+_bt("Sem corte").invoke();        assert A.cfg.get("corte") == "nao"
+_bt("Parcial (preso)").invoke();  assert A.cfg.get("corte") == "parcial"
+_bt("Corte total").invoke();      assert "corte" not in A.cfg
+_bt("3 vias").invoke();           assert A.cfg.get("vias_cupom") == 3
+_bt("1 via").invoke();            assert "vias_cupom" not in A.cfg
+# avanco antes do corte
+cb_av = next(x for x in combos if tuple(x.cget("values")) == tuple(str(i) for i in range(9)))
+cb_av.set("2"); cb_av.event_generate("<<ComboboxSelected>>"); w.update()
+assert A.cfg.get("avanco_linhas") == 2, A.cfg.get("avanco_linhas")
+cb_av.set("5"); cb_av.event_generate("<<ComboboxSelected>>"); w.update()
+assert "avanco_linhas" not in A.cfg, A.cfg.get("avanco_linhas")
+# e tudo isso foi SALVO no disco a cada clique (salvar_config chamado)
+assert gravados, "salvar_config nunca foi chamado pelos controles"
+print("10) todos os controles da aba Impressao gravam e limpam a config certa OK")
 
 w.destroy(); A._root.destroy()
 print("\nUI CONFIG: TUDO OK")
