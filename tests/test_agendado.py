@@ -29,7 +29,8 @@ sched = dict(base, is_scheduled=True, scheduled_for="2026-09-09T15:00:00+00:00",
              scheduled_label="AGENDADO: 09/09 AS 12:00")
 LBL = "[[ALTO_ON]]AGENDADO: 09/09 AS 12:00[[ALTO_OFF]]"
 S48 = "-" * 48
-MARC = ("[[ALTO_ON]]", "[[ALTO_OFF]]", "[[BIG_ORDER_ON]]", "[[BIG_ORDER_OFF]]", "[[NEG_ON]]", "[[NEG_OFF]]")
+MARC = ("[[ALTO_ON]]", "[[ALTO_OFF]]", "[[BIG_ORDER_ON]]", "[[BIG_ORDER_OFF]]", "[[NEG_ON]]", "[[NEG_OFF]]",
+        "[[FS0]]", "[[FS1]]", "[[FS2]]", "[[FS3]]", "[[FSB]]")   # v5.81: tamanho por secao
 def limpo(l):
     for m in MARC: l = l.replace(m, "")
     return l
@@ -62,7 +63,9 @@ print("2) cupom OK: linha", i)
 # 3) Comanda: label logo apos PEDIDO #, antes de tipo/mesa/itens
 outk = A._fmt(copy.deepcopy(sched), "kitchen", "kitchen").split("\n")
 j = outk.index(LBL)
-assert outk[j - 1] == "[[BIG_ORDER_ON]]PEDIDO #123[[BIG_ORDER_OFF]]", outk[j - 1]
+# v5.81: o destaque do pedido virou NEG_ON+FSn (fonte da secao, clampada ao papel); o que
+# importa aqui e a ORDEM (label logo apos o PEDIDO #), nao os bytes do destaque.
+assert "PEDIDO #123" in outk[j - 1] and outk[j - 1].startswith("[[NEG_ON]][[FS"), outk[j - 1]
 assert not any("Pizza Calabresa" in l for l in outk[:j])
 print("3) comanda OK: linha", j)
 
@@ -83,19 +86,22 @@ o = A._fmt(copy.deepcopy(dict(base, scheduled_label="AGENDADO: 09/09 ÀS 12:00")
 assert "[[ALTO_ON]]AGENDADO: 09/09 ÀS 12:00[[ALTO_OFF]]" in o.split("\n"), "nao re-formata"
 print("5) shapes aninhados + blindagem OK")
 
-# 6) Bytes ESC/POS: center + bold + ALTURA dupla (GS ! 0x01), texto, volta ao normal
+# 6) Bytes ESC/POS: center + bold + ALTURA dupla (GS ! 0x01), texto, volta ao estado BASE
+# (v5.81: o OFF restaura o tamanho base do cupom em vez de zerar; com fonte normal os bytes
+# sao IDENTICOS aos historicos: GS ! 0x00 + bold off + left).
+ALTO_ON = b"\x1b\x61\x01\x1b\x45\x01\x1d\x21\x01"
 b = A._substituir_marcadores_escpos(LBL)
-assert b == A._ESCPOS_ALTO_ON + b"AGENDADO: 09/09 AS 12:00" + A._ESCPOS_ALTO_OFF, b
-assert A._ESCPOS_ALTO_ON.endswith(b"\x1d\x21\x01") and A._ESCPOS_ALTO_OFF.startswith(b"\x1d\x21\x00")
+assert b == ALTO_ON + b"AGENDADO: 09/09 AS 12:00" + A._bytes_restaura_base(), b
+assert A._bytes_restaura_base() == b"\x1d\x21\x00\x1b\x45\x00\x1b\x61\x00", "fonte normal => bytes historicos"
 assert b"[[" not in b
 print("6) bytes OK")
 
-# 7) Comanda em fonte grande (cfg font_size=1): caminho de bytes com a label em altura dupla
+# 7) Comanda em fonte grande (cfg font_size=1 = Media na escala v5.81): caminho de bytes
 A.cfg["font_size"] = 1
 try:
     bk = A._fmt(copy.deepcopy(sched), "kitchen", "kitchen")
     assert isinstance(bk, bytes)
-    assert A._ESCPOS_ALTO_ON + b"AGENDADO: 09/09 AS 12:00" + A._ESCPOS_ALTO_OFF in bk
+    assert ALTO_ON + b"AGENDADO: 09/09 AS 12:00" + A._bytes_restaura_base() in bk
     o = A._fmt(copy.deepcopy(sched), "order", "receipt").split("\n")
     assert LBL in o, "label em UMA linha no receipt com font_size=1"
 finally:
