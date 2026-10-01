@@ -199,4 +199,30 @@ for tipo in ("order","pickup","delivery"):
     nenhuma_estoura(ls_t, 42)
     assert any(t.strip().startswith("TOTAL:") for t,_,_,_ in ls_t), f"{tipo}: sem TOTAL"
 
+# ── 9. VIAS no fluxo real (proc_job): vias_cupom multiplica o cupom do cliente,
+#       imp['vias'] vence o geral, e comanda de setor sai SEMPRE em 1 via ─────────────────
+reset_cfg()
+A.cfg["impressoras"] = [
+    {"nome":"Caixa","area":"caixa","printer_type":"receipt","tipo":"comum_win32","nome_impressora":"IMP-CAIXA"},
+    {"nome":"Cozinha","area":"cozinha","printer_type":"kitchen","tipo":"comum_win32","nome_impressora":"IMP-COZ"},
+]
+_impressos = []
+A._imprimir_com_roteamento = lambda imp, dados: (_impressos.append(imp.get("nome_impressora")), {"ok": True})[1]
+A.ef_update_job = lambda *a, **k: True
+def _job(pt, jt):
+    return {"id":"job-teste","printer_type":pt,"job_type":jt,"content":dict(CONTENT),"copies":1}
+
+A.cfg["vias_cupom"] = 2
+_impressos.clear(); A.proc_job(_job("receipt","order"))
+assert _impressos == ["IMP-CAIXA","IMP-CAIXA"], f"vias_cupom=2 deveria imprimir 2x na caixa: {_impressos}"
+_impressos.clear(); A.proc_job(_job("kitchen","kitchen"))
+assert _impressos == ["IMP-COZ"], f"comanda NUNCA multiplica por vias: {_impressos}"
+A.cfg["impressoras"][0]["vias"] = 3   # por impressora vence o geral
+_impressos.clear(); A.proc_job(_job("receipt","order"))
+assert _impressos == ["IMP-CAIXA"]*3, f"imp['vias']=3 deveria vencer o geral: {_impressos}"
+A.cfg["impressoras"][0].pop("vias"); A.cfg.pop("vias_cupom")
+_impressos.clear(); A.proc_job(_job("receipt","order"))
+assert _impressos == ["IMP-CAIXA"], f"sem config, 1 via como sempre: {_impressos}"
+reset_cfg(); A.cfg.pop("impressoras", None)
+
 print("OK - todos os testes de fonte/impressao v5.81 passaram")

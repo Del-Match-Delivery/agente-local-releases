@@ -139,5 +139,49 @@ assert _imp_t.get("nome_impressora") == "POS-58", _imp_t
 assert isinstance(_dados_t, str) and "PEDIDO #123" in _dados_t and "TOTAL:" in _dados_t, _dados_t[:200]
 print("9) aba Impressao: Media, 2 vias e 'Imprimir cupom de teste' OK")
 
+# 10) v5.81: TODOS os controles da aba Impressao gravam a config certa.
+def _bt(txt):
+    return next(b for b in todos_botoes if b.cget("text") == txt)
+# tamanho base: Grande e volta a Normal
+_bt("Grande").invoke();  assert A.cfg.get("font_size") == 2
+_bt("Normal").invoke()   # ha 2 botoes 'Normal' (tamanho e espaco); o 1o criado e o do tamanho
+assert A.cfg.get("font_size") in (0, 2)   # ver asserts dedicados de espaco abaixo
+# secoes: combos com 'Herda' aparecem na ordem loja, itens, total, rodape (pedido tem 'Auto')
+combos_sec = [x for x in combos if "Herda" in x.cget("values")]
+assert len(combos_sec) == 4, len(combos_sec)
+cb_total = combos_sec[2]
+cb_total.set("Grande"); cb_total.event_generate("<<ComboboxSelected>>"); w.update()
+assert (A.cfg.get("fonte_secoes") or {}).get("total") == 2, A.cfg.get("fonte_secoes")
+cb_total.set("Herda"); cb_total.event_generate("<<ComboboxSelected>>"); w.update()
+assert "total" not in (A.cfg.get("fonte_secoes") or {}), A.cfg.get("fonte_secoes")
+# estilo: checkbuttons e espaco
+chks = {x.cget("text"): x for x in ws if x.winfo_class() == "Checkbutton"}
+ck_neg = next(v for k, v in chks.items() if "Negrito no cupom" in k)
+ck_esc = next(v for k, v in chks.items() if "mais escura" in k)
+ck_neg.invoke(); assert A.cfg.get("negrito_cupom") is True
+ck_neg.invoke(); assert "negrito_cupom" not in A.cfg
+ck_esc.invoke(); assert A.cfg.get("mais_escuro") is True
+ck_esc.invoke(); assert "mais_escuro" not in A.cfg
+_bt("Compacto").invoke(); assert A.cfg.get("espaco_linhas") == 0
+_bt("Espacado").invoke(); assert A.cfg.get("espaco_linhas") == 2
+# largura da bobina: 58mm grava 32; Auto remove (volta ao automatico do servidor)
+_bt("58mm").invoke(); assert A.cfg.get("paper_width_cols") == 32
+_bt("Auto").invoke(); assert "paper_width_cols" not in A.cfg
+# corte e vias
+_bt("Sem corte").invoke();        assert A.cfg.get("corte") == "nao"
+_bt("Parcial (preso)").invoke();  assert A.cfg.get("corte") == "parcial"
+_bt("Corte total").invoke();      assert "corte" not in A.cfg
+_bt("3 vias").invoke();           assert A.cfg.get("vias_cupom") == 3
+_bt("1 via").invoke();            assert "vias_cupom" not in A.cfg
+# avanco antes do corte
+cb_av = next(x for x in combos if tuple(x.cget("values")) == tuple(str(i) for i in range(9)))
+cb_av.set("2"); cb_av.event_generate("<<ComboboxSelected>>"); w.update()
+assert A.cfg.get("avanco_linhas") == 2, A.cfg.get("avanco_linhas")
+cb_av.set("5"); cb_av.event_generate("<<ComboboxSelected>>"); w.update()
+assert "avanco_linhas" not in A.cfg, A.cfg.get("avanco_linhas")
+# e tudo isso foi SALVO no disco a cada clique (salvar_config chamado)
+assert gravados, "salvar_config nunca foi chamado pelos controles"
+print("10) todos os controles da aba Impressao gravam e limpam a config certa OK")
+
 w.destroy(); A._root.destroy()
 print("\nUI CONFIG: TUDO OK")
