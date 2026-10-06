@@ -972,7 +972,7 @@ def _flag_print_barcode(content):
         return content.get("print_barcode") is True
     return _print_barcode_servidor is True
 
-_MARCADOR_RE = re.compile(r"\[\[(BIG_ORDER_ON|BIG_ORDER_OFF|NEG_ON|NEG_OFF|ALTO_ON|ALTO_OFF|FS[0-3]|FSB|EAN13:\d{13})\]\]")
+_MARCADOR_RE = re.compile(r"\[\[(BIG_ORDER_ON|BIG_ORDER_OFF|NEG_ON|NEG_OFF|ALTO_ON|ALTO_OFF|EAN13:\d{13})\]\]")
 
 def _tem_marcador(texto):
     """True se a linha tem marcador ESC/POS que precisa virar bytes crus."""
@@ -2111,47 +2111,6 @@ def _fmt(content, jt, pt, imp=None):
                      f"itens com codigo: {_ncod}/{len(_its_log)} (EAN-13 validos: {_nean})")
         except Exception:
             pass
-
-    def _lin_valor(rotulo, valor, secao=None):
-        """Linha 'rotulo .... valor' dos totais. Se a secao tem fonte propria (fonte_secoes),
-        reformata na largura logica dela e embrulha nos marcadores [[FSn]]/[[FSB]]. Quando
-        rotulo+valor nao cabem juntos (ex.: Extra em 58 mm = 10 colunas), _par EMPILHA o
-        valor na linha de baixo em vez de deixar a impressora quebrar no meio do numero."""
-        sc = _fonte_secao(secao) if secao else None
-        if sc is None or sc == _fs:
-            return _par(rotulo, valor, w)
-        ws = max(8, w_fis // _FONTE_WMUL[sc])
-        return [f"[[FS{sc}]]{l}[[FSB]]" for l in _par(rotulo, valor, ws)]
-
-    def _lin_centro(texto, secao):
-        """Linha centralizada (nome da loja, rodape) com fonte propria opcional por secao."""
-        sc = _fonte_secao(secao)
-        if sc is None or sc == _fs:
-            return [texto.center(w)]
-        sc = _fonte_que_cabe(sc, texto, w_fis)
-        if sc == _fs:
-            return [texto.center(w)]
-        ws = max(8, w_fis // _FONTE_WMUL[sc])
-        return [f"[[FS{sc}]]{l.center(ws)}[[FSB]]" for l in _wrap_linhas(texto, ws)]
-
-    def _lin_item(item):
-        """Linha '[ qx ] nome ... preco' do item, com fonte propria opcional (secao 'itens')."""
-        sc = _fonte_secao("itens")
-        q = _qtd_do_item(item); nome = _nome_com_tamanho(item); preco = _preco_do_item(item)
-        if sc is None or sc == _fs:
-            return [_li(q, nome, preco, w)]
-        ws = max(8, w_fis // _FONTE_WMUL[sc])
-        return [f"[[FS{sc}]]{l}[[FSB]]" for l in _li(q, nome, preco, ws).split("\n")]
-
-    def _lin_pedido(n):
-        """Numero do pedido em destaque: center+bold (NEG) + fonte da secao 'pedido' — padrao
-        Grande (2x2, o historico), nunca menor que a base do cupom — reduzida ate a linha
-        caber na largura FISICA (Extra com 'PEDIDO #123' nao cabe em 58 mm)."""
-        t = f"PEDIDO #{n}"
-        sc = _fonte_secao("pedido")
-        if sc is None: sc = max(2, _fs)
-        sc = _fonte_que_cabe(sc, t, w_fis)
-        return f"[[NEG_ON]][[FS{sc}]]{t}[[FSB]][[NEG_OFF]]"
 
     # Flags de exibição configuráveis
     show_phone    = content.get("print_customer_info", True)
