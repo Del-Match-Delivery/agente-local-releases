@@ -72,12 +72,21 @@ def interpretar(dados, colunas, modo="normal"):
             if c == 0x56:   # GS V
                 flush(); linhas.append(dict(tipo="corte")); i += 3 if dados[i + 2] in (0, 1, 48, 49) else 4; continue
             if c in (0x68, 0x77, 0x48, 0x66): i += 3; continue   # GS h/w/H/f (parametros de codigo de barras)
-            if c == 0x6B:   # GS k m n d1..dn
+            if c == 0x6B:   # GS k: funcao B (m>=65: m n d1..dn) ou funcao A (m 0..6: m d1..dk NUL)
                 m = dados[i + 2]
                 if m >= 65:
                     k = dados[i + 3]; cod = dados[i + 4:i + 4 + k].decode("ascii", "replace")
                     flush(); linhas.append(dict(tipo="barras", texto=f"{'EAN-13' if m == 67 else 'Code128' if m == 73 else m} {cod}", alinhamento=st["alin"]))
                     i += 4 + k; continue
+                if m <= 6:      # v5.82: EAN-13 sai em funcao A (m=2), terminado em NUL
+                    fim = dados.find(b"\x00", i + 3)
+                    if fim < 0: avisos.append(f"GS k {m} sem NUL no byte {i}"); fim = n
+                    cod = dados[i + 3:fim].decode("ascii", "replace")
+                    nome = {0: "UPC-A", 1: "UPC-E", 2: "EAN-13", 3: "EAN-8", 4: "CODE39", 5: "ITF", 6: "CODABAR"}[m]
+                    if m == 2 and not (len(cod) in (12, 13) and cod.isdigit()):
+                        avisos.append(f"EAN-13 com dados invalidos: {cod!r}")
+                    flush(); linhas.append(dict(tipo="barras", texto=f"{nome} {cod}", alinhamento=st["alin"]))
+                    i = fim + 1; continue
             if c == 0x28 and i + 4 < n and dados[i + 2] == 0x6B:   # GS ( k (QR)
                 pl = dados[i + 3] + 256 * dados[i + 4]
                 if dados[i + 6] == 0x51: flush(); linhas.append(dict(tipo="qr", alinhamento=st["alin"]))

@@ -136,6 +136,48 @@ o = A._fmt(copy.deepcopy(dict(sched, itens=[it])), "order", "receipt").split("\n
 assert "  Cod: 7891000100103" in o, "sem print_barcode => so o texto do codigo"
 print("8b) EAN-13 (COMP-46) + agendado juntos OK")
 
+# 8c) v5.82: job SEM a chave print_barcode (trigger do banco / create_public_order / print-job-create)
+#     obedece ao ajuste da loja vindo do poll; chave presente no job sempre vence; bytes compativeis.
+_pb_antes = A._print_barcode_servidor
+try:
+    A._print_barcode_servidor = True
+    o = A._fmt(copy.deepcopy(dict(sched, itens=[it])), "order", "receipt").split("\n")
+    assert "[[EAN13:7891000100103]]" in o, "job sem a chave + loja LIGADA => barras"
+    o = A._fmt(copy.deepcopy(dict(sched, itens=[it], print_barcode=False)), "order", "receipt").split("\n")
+    assert "  Cod: 7891000100103" in o and "[[EAN13:7891000100103]]" not in o, "print_barcode=False no job vence a loja"
+    A._print_barcode_servidor = False
+    o = A._fmt(copy.deepcopy(dict(sched, itens=[it])), "order", "receipt").split("\n")
+    assert "  Cod: 7891000100103" in o, "loja desligada => texto"
+    o = A._fmt(copy.deepcopy(dict(sched, itens=[it], print_barcode=True)), "order", "receipt").split("\n")
+    assert "[[EAN13:7891000100103]]" in o, "print_barcode=True no job vence a loja desligada"
+    A._print_barcode_servidor = None
+    o = A._fmt(copy.deepcopy(dict(sched, itens=[it])), "order", "receipt").split("\n")
+    assert "  Cod: 7891000100103" in o, "sem chave e sem ajuste => texto (nenhuma loja muda sem pedir)"
+    # comanda de cozinha: mesma regra de precedencia do cupom (comportamento da v5.80/5.81 mantido:
+    # a comanda tambem leva a linha do codigo quando o item tem codigo)
+    A._print_barcode_servidor = True
+    k = A._fmt(copy.deepcopy(dict(sched, itens=[it])), "kitchen", "kitchen")
+    k2 = A._fmt(copy.deepcopy(dict(sched, itens=[it], print_barcode=True)), "kitchen", "kitchen")
+    assert k == k2, "comanda: job sem a chave + loja ligada == job com print_barcode=True"
+    assert A._flag_print_barcode({"print_barcode": "true"}) is False, "so booleano True liga"
+    assert A._flag_print_barcode(None) is False
+finally:
+    A._print_barcode_servidor = _pb_antes
+# bytes: funcao A (GS k 2 ... NUL), sem HRI da impressora, numero em texto logo abaixo, sem LF final
+b = A._escpos_barcode_ean13("7891000100103")
+assert b.startswith(bytes([0x1d, 0x68])), "GS h (altura) primeiro"
+assert bytes([0x1d, 0x77, 3]) in b, "GS w 3 (modulo 3 pontos)"
+assert bytes([0x1d, 0x48, 0]) in b, "GS H 0: HRI da impressora desligado"
+assert b"\x1d\x6b\x02" + b"7891000100103" + b"\x00" in b, "GS k m=2 + 13 digitos + NUL (funcao A)"
+assert b"\x1d\x6b\x43" not in b, "funcao B (m=67) nao e mais usada"
+assert b.endswith(b"  Cod: 7891000100103"), "numero legivel em texto e sem LF final (o join poe)"
+assert b.count(b"\n") == 1, "exatamente um LF entre as barras e o texto"
+m = A._substituir_marcadores_escpos("[[EAN13:7891000100103]]\n")
+assert m.startswith(b"\x1d\x68") and m.endswith(b"  Cod: 7891000100103\n"), "marcador vira barras + texto + LF do join"
+assert A._valida_ean13("7899026422315") and A._valida_ean13("7899026401792"), "EANs reais da Emy validam"
+assert not A._valida_ean13("7899026422316"), "digito verificador errado reprova"
+print("8c) v5.82: fallback do ajuste da loja + bytes EAN-13 funcao A com numero em texto OK")
+
 # 9) Cupom em 42 colunas: nenhuma linha passa de 42 e o preco alinha na coluna 42
 o = A._fmt(copy.deepcopy(dict(sched, paper_width="42")), "order", "receipt").split("\n")
 vis = [limpo(l) for l in o]
