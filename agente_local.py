@@ -431,12 +431,16 @@ def _post(url, data, token, timeout=30, retries=2):
 _agents_online = []  # Atualizado a cada poll
 _token_invalido = False  # Evita abrir configuracoes multiplas vezes
 _paper_width_servidor = None  # printer_settings.paper_width do cardapio (32/42/48), vindo do poll (v5.79)
+# v5.82: interruptor "Imprimir codigo de barras do produto" da loja (printer_settings.print_barcode),
+# vindo do poll. True/False quando a loja tem a linha de ajustes; None quando o servidor nao mandou.
+# Serve de fallback para job que chega SEM a chave print_barcode no content (ver _flag_print_barcode).
+_print_barcode_servidor = None
 _config_auto_ja = False  # ja auto-abrimos a config nesta sessao (NUNCA reabrir sozinho depois)
 _janela_config = None    # janela de config unica (singleton: nao empilha nem rouba foco no automatico)
 _janela_dashboard = None # janela de status unica (singleton)
 
 def ef_poll_jobs():
-    global _agents_online, _token_invalido, _config_auto_ja, _paper_width_servidor
+    global _agents_online, _token_invalido, _config_auto_ja, _paper_width_servidor, _print_barcode_servidor
     imps = cfg.get("impressoras", [])
     # Declara TODAS as areas cadastradas (com ou sem nome_impressora).
     # O agente recebe todos os jobs das suas areas e processa apenas os que tem impressora mapeada.
@@ -468,10 +472,25 @@ def ef_poll_jobs():
         # trigger nao trazem paper_width no content, entao o cupom saia em 48 colunas numa
         # impressora de 42 (precos quebrando em duas linhas). Guardado aqui, aplicado em proc_job.
         try:
-            _pw = _colunas_validas((resp.get("settings") or {}).get("paper_width"))
+            # v5.82: o agent-unified-poll devolve a linha de printer_settings em resp.config.settings
+            # (nao em resp.settings — ate a v5.81 este codigo lia a chave errada e nunca achava nada).
+            _st = resp.get("settings")
+            if not isinstance(_st, dict): _st = (resp.get("config") or {}).get("settings")
+            if not isinstance(_st, dict): _st = {}
+            _pw = _colunas_validas(_st.get("paper_width"))
             if _pw and _pw != _paper_width_servidor:
                 log.info(f"[POLL] Largura do papel (cardapio): {_pw} colunas")
                 _paper_width_servidor = _pw
+            # v5.82: interruptor do codigo de barras da loja. Job criado pelo trigger do banco (todo
+            # pedido do PDV nasce 'new' e o trigger cria o cupom antes do app), pelo create_public_order
+            # ou pelo print-job-create chega SEM a chave print_barcode — so os hooks do app a gravam.
+            # Guardado aqui e usado em _fmt quando o content nao decide (ver _flag_print_barcode).
+            _pb = _st.get("print_barcode")
+            _pb = True if _pb is True else (False if _pb is False else None)
+            if _pb != _print_barcode_servidor:
+                log.info("[POLL] Codigo de barras no cupom (ajuste da loja): "
+                         + ("LIGADO" if _pb else ("desligado" if _pb is False else "sem ajuste no servidor")))
+                _print_barcode_servidor = _pb
         except Exception:
             pass
         jobs = resp.get("print_jobs") or resp.get("jobs") or []
@@ -807,17 +826,29 @@ def _valida_ean13(codigo):
     dv = (10 - (soma % 10)) % 10
     return dv == digitos[12]
 
-def _escpos_barcode_ean13(codigo, altura=60):
-    """Bytes ESC/POS (GS k, m=67/EAN13) com HRI (texto legivel) abaixo das barras.
-    So chamar com codigo ja validado por _valida_ean13 (13 digitos, todos ASCII)."""
+def _escpos_barcode_ean13(codigo, altura=80):
+    """Bytes ESC/POS do EAN-13 + o numero em texto logo abaixo.
+    So chamar com codigo ja validado por _valida_ean13 (13 digitos, todos ASCII).
+
+    v5.82 — por que mudou (uma semana de cupom saindo SEM nada no lugar do codigo):
+      * GS k m=2 (funcao A, dados terminados em NUL) no lugar de m=67 (funcao B, com byte
+        de tamanho). A funcao A e a do ESC/POS original e toda termica Epson-compativel
+        (Bematech/Elgin/Daruma em emulacao, clones 58/80 mm) aceita; a B falta em firmware
+        antigo — e impressora que nao conhece o comando descarta a linha inteira em silencio.
+      * HRI da impressora DESLIGADO (GS H 0) e o numero impresso por NOS como texto comum
+        ('  Cod: 7899...'), igual a linha que sai com o ajuste desligado. Assim, mesmo que a
+        impressora ignore o comando de barras, o codigo do produto NUNCA some do papel.
+      * Modulo 3 pontos (GS w 3) e 80 pontos de altura: barra de ~36 mm x 10 mm, que cabe em
+        58 mm (384 pontos) e que leitor de balcao le; com modulo 2 (24 mm) leitor barato falha.
+    Nao termina em LF: quem monta o cupom ja separa as linhas com '\\n'."""
     dados = codigo.encode("ascii")
     return (
-        bytes([0x1d, 0x68, altura]) +   # GS h: altura do barcode em pontos
-        bytes([0x1d, 0x77, 2]) +        # GS w: largura das barras (2-6)
-        bytes([0x1d, 0x48, 2]) +        # GS H: HRI abaixo do barcode
-        bytes([0x1d, 0x66, 0]) +        # GS f: fonte do HRI
-        bytes([0x1d, 0x6b, 67, len(dados)]) + dados +
-        b"\n"
+        bytes([0x1d, 0x68, altura]) +           # GS h: altura das barras em pontos
+        bytes([0x1d, 0x77, 3]) +                # GS w: largura do modulo (2-6)
+        bytes([0x1d, 0x48, 0]) +                # GS H 0: sem HRI da impressora (texto e nosso, abaixo)
+        bytes([0x1d, 0x6b, 2]) + dados + b"\x00" +   # GS k m=2: EAN-13 (funcao A), terminado em NUL
+        b"\n" +
+        _enc(_txt(f"  Cod: {codigo}"))         # numero legivel SEMPRE, no codepage da impressora
     )
 
 def _linha_codigo_item(item, imprime_barcode=False):
@@ -835,6 +866,22 @@ def _linha_codigo_item(item, imprime_barcode=False):
     if not codigo: return ""
     if imprime_barcode and _valida_ean13(codigo): return f"[[EAN13:{codigo}]]"
     return f"  Cod: {codigo}"
+
+def _flag_print_barcode(content):
+    """Decide se o cupom deste job sai com barras EAN-13 (v5.82).
+
+    1. O job TRAZ a chave print_barcode (hooks do app gravam true/false): vale o que veio.
+    2. O job NAO traz a chave: vale o ajuste da loja recebido no poll (_print_barcode_servidor).
+       E o caso de TODO pedido do PDV: ele nasce com status 'new', o trigger do banco cria o
+       cupom na hora (sem a chave e sem nada de printer_settings) e o app, ao ver que ja existe
+       cupom, nao cria o dele. Ate a v5.81 isso significava: ajuste LIGADO na tela da loja e
+       cupom saindo sem barras, sem mensagem nenhuma. Mesma coisa para create_public_order
+       (cardapio publico) e print-job-create (pagamento online / reimpressao).
+    3. Sem nenhum dos dois: desligado (comportamento de sempre; nenhuma loja muda sem pedir)."""
+    if not isinstance(content, dict): return False
+    if "print_barcode" in content:
+        return content.get("print_barcode") is True
+    return _print_barcode_servidor is True
 
 _MARCADOR_RE = re.compile(r"\[\[(BIG_ORDER_ON|BIG_ORDER_OFF|NEG_ON|NEG_OFF|ALTO_ON|ALTO_OFF|EAN13:\d{13})\]\]")
 
@@ -1950,6 +1997,20 @@ def _fmt(content, jt, pt, imp=None):
         elif _fs >= 2:
             w = w // 3
     S="-"*w
+    # v5.82: interruptor do codigo de barras decidido UMA vez por cupom (content > ajuste da loja via
+    # poll > desligado) e registrado no log — para nunca mais depurar isto no escuro.
+    _barcode_on = _flag_print_barcode(content)
+    if not _is_kitchen:
+        try:
+            _its_log = _itens_do_content(content)
+            _ncod = sum(1 for _i in _its_log if _codigo_do_item(_i))
+            _nean = sum(1 for _i in _its_log if _valida_ean13(_codigo_do_item(_i)))
+            _orig = ("chave print_barcode do job" if "print_barcode" in content
+                     else ("ajuste da loja (poll)" if _print_barcode_servidor is not None else "nenhum: job sem a chave e servidor sem ajuste"))
+            log.info(f"[CUPOM] codigo de barras: {'LIGADO' if _barcode_on else 'desligado'} | origem: {_orig} | "
+                     f"itens com codigo: {_ncod}/{len(_its_log)} (EAN-13 validos: {_nean})")
+        except Exception:
+            pass
 
     # Flags de exibição configuráveis
     show_phone    = content.get("print_customer_info", True)
@@ -2017,7 +2078,7 @@ def _fmt(content, jt, pt, imp=None):
                 size=_size_do_item(item)
                 ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
                 ll += _linha_pai(item)
-                _cod_ln=_linha_codigo_item(item, content.get("print_barcode") is True)
+                _cod_ln=_linha_codigo_item(item, _barcode_on)
                 if _cod_ln: ll.append(_cod_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
@@ -2090,7 +2151,7 @@ def _fmt(content, jt, pt, imp=None):
                     size=_size_do_item(item)
                     q=_qtd_do_item(item); ll.append(f"[ {q}x ]  {_nome_com_tamanho(item)}")
                     ll += _linha_pai(item)
-                    _cod_ln=_linha_codigo_item(item, content.get("print_barcode") is True)
+                    _cod_ln=_linha_codigo_item(item, _barcode_on)
                     if _cod_ln: ll.append(_cod_ln)
                     for a in _adicionais_do_item(item):
                         if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
@@ -2134,7 +2195,7 @@ def _fmt(content, jt, pt, imp=None):
                     parts.append(enc(f"[ {q}x ]  {nome}"))
                     parts.append(FNORMAL)
                     for linha in _linha_pai(item): parts.append(enc(linha))
-                    _cod_ln=_linha_codigo_item(item, content.get("print_barcode") is True)
+                    _cod_ln=_linha_codigo_item(item, _barcode_on)
                     if _cod_ln: parts.append(_substituir_marcadores_escpos(_cod_ln + "\n"))
                     for a in _adicionais_do_item(item):
                         if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
@@ -2189,7 +2250,7 @@ def _fmt(content, jt, pt, imp=None):
                 size=_size_do_item(item)
                 ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
                 ll += _linha_pai(item)
-                _cod_ln=_linha_codigo_item(item, content.get("print_barcode") is True)
+                _cod_ln=_linha_codigo_item(item, _barcode_on)
                 if _cod_ln: ll.append(_cod_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
@@ -2246,7 +2307,7 @@ def _fmt(content, jt, pt, imp=None):
                 size=_size_do_item(item)
                 ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
                 ll += _linha_pai(item)
-                _cod_ln=_linha_codigo_item(item, content.get("print_barcode") is True)
+                _cod_ln=_linha_codigo_item(item, _barcode_on)
                 if _cod_ln: ll.append(_cod_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
@@ -2642,7 +2703,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.80"
+CURRENT_VERSION = "5.82"
 VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
