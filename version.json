@@ -1,8 +1,8 @@
 {
   "version": "5.77",
-  "url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.81/AgenteLocal.exe",
-  "latest_version": "5.81",
-  "latest_url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.81/AgenteLocal.exe",
-  "notes": "v5.81 - fonte do cupom inteiro, tamanho por impressora/secao, estilo, corte e vias",
+  "url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.82/AgenteLocal.exe",
+  "latest_version": "5.82",
+  "latest_url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.82/AgenteLocal.exe",
+  "notes": "v5.82 - codigo de barras no cupom sai de verdade (ajuste da loja via poll, EAN-13 compativel, numero sempre em texto)",
   "_REGRA_DE_PUBLICACAO": "'version' fica CONGELADO em 5.77 para sempre: agentes <=5.77 tem o auto-update QUEBRADO (o bat morre no proprio taskkill) e comparam SO 'version' — se mudar, cada um deles se mata uma vez (loja sem agente) e trava na versao antiga. 'url' PODE (e deve) apontar para o exe mais novo: esses agentes nunca baixam (version igual a deles), mas o InstalarAgente.exe e os bats antigos leem 'url' e assim instalam a versao atual. A cada versao nova atualize latest_version + latest_url + url, NUNCA version. Clientes em <=5.77 migram uma unica vez pelo ATUALIZAR_E_ABRIR_AGENTE.bat. Downgrade automatico so com \"allow_downgrade\": true."
 }
