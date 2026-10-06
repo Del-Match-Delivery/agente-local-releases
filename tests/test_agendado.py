@@ -29,7 +29,8 @@ sched = dict(base, is_scheduled=True, scheduled_for="2026-09-09T15:00:00+00:00",
              scheduled_label="AGENDADO: 09/09 AS 12:00")
 LBL = "[[ALTO_ON]]AGENDADO: 09/09 AS 12:00[[ALTO_OFF]]"
 S48 = "-" * 48
-MARC = ("[[ALTO_ON]]", "[[ALTO_OFF]]", "[[BIG_ORDER_ON]]", "[[BIG_ORDER_OFF]]", "[[NEG_ON]]", "[[NEG_OFF]]")
+MARC = ("[[ALTO_ON]]", "[[ALTO_OFF]]", "[[BIG_ORDER_ON]]", "[[BIG_ORDER_OFF]]", "[[NEG_ON]]", "[[NEG_OFF]]",
+        "[[FS0]]", "[[FS1]]", "[[FS2]]", "[[FS3]]", "[[FSB]]")   # v5.81: tamanho por secao
 def limpo(l):
     for m in MARC: l = l.replace(m, "")
     return l
@@ -62,7 +63,9 @@ print("2) cupom OK: linha", i)
 # 3) Comanda: label logo apos PEDIDO #, antes de tipo/mesa/itens
 outk = A._fmt(copy.deepcopy(sched), "kitchen", "kitchen").split("\n")
 j = outk.index(LBL)
-assert outk[j - 1] == "[[BIG_ORDER_ON]]PEDIDO #123[[BIG_ORDER_OFF]]", outk[j - 1]
+# v5.81: o destaque do pedido virou NEG_ON+FSn (fonte da secao, clampada ao papel); o que
+# importa aqui e a ORDEM (label logo apos o PEDIDO #), nao os bytes do destaque.
+assert "PEDIDO #123" in outk[j - 1] and outk[j - 1].startswith("[[NEG_ON]][[FS"), outk[j - 1]
 assert not any("Pizza Calabresa" in l for l in outk[:j])
 print("3) comanda OK: linha", j)
 
@@ -83,19 +86,22 @@ o = A._fmt(copy.deepcopy(dict(base, scheduled_label="AGENDADO: 09/09 ÀS 12:00")
 assert "[[ALTO_ON]]AGENDADO: 09/09 ÀS 12:00[[ALTO_OFF]]" in o.split("\n"), "nao re-formata"
 print("5) shapes aninhados + blindagem OK")
 
-# 6) Bytes ESC/POS: center + bold + ALTURA dupla (GS ! 0x01), texto, volta ao normal
+# 6) Bytes ESC/POS: center + bold + ALTURA dupla (GS ! 0x01), texto, volta ao estado BASE
+# (v5.81: o OFF restaura o tamanho base do cupom em vez de zerar; com fonte normal os bytes
+# sao IDENTICOS aos historicos: GS ! 0x00 + bold off + left).
+ALTO_ON = b"\x1b\x61\x01\x1b\x45\x01\x1d\x21\x01"
 b = A._substituir_marcadores_escpos(LBL)
-assert b == A._ESCPOS_ALTO_ON + b"AGENDADO: 09/09 AS 12:00" + A._ESCPOS_ALTO_OFF, b
-assert A._ESCPOS_ALTO_ON.endswith(b"\x1d\x21\x01") and A._ESCPOS_ALTO_OFF.startswith(b"\x1d\x21\x00")
+assert b == ALTO_ON + b"AGENDADO: 09/09 AS 12:00" + A._bytes_restaura_base(), b
+assert A._bytes_restaura_base() == b"\x1d\x21\x00\x1b\x45\x00\x1b\x61\x00", "fonte normal => bytes historicos"
 assert b"[[" not in b
 print("6) bytes OK")
 
-# 7) Comanda em fonte grande (cfg font_size=1): caminho de bytes com a label em altura dupla
+# 7) Comanda em fonte grande (cfg font_size=1 = Media na escala v5.81): caminho de bytes
 A.cfg["font_size"] = 1
 try:
     bk = A._fmt(copy.deepcopy(sched), "kitchen", "kitchen")
     assert isinstance(bk, bytes)
-    assert A._ESCPOS_ALTO_ON + b"AGENDADO: 09/09 AS 12:00" + A._ESCPOS_ALTO_OFF in bk
+    assert ALTO_ON + b"AGENDADO: 09/09 AS 12:00" + A._bytes_restaura_base() in bk
     o = A._fmt(copy.deepcopy(sched), "order", "receipt").split("\n")
     assert LBL in o, "label em UMA linha no receipt com font_size=1"
 finally:
@@ -129,6 +135,48 @@ assert "[[EAN13:7891000100103]]" in o and LBL in o
 o = A._fmt(copy.deepcopy(dict(sched, itens=[it])), "order", "receipt").split("\n")
 assert "  Cod: 7891000100103" in o, "sem print_barcode => so o texto do codigo"
 print("8b) EAN-13 (COMP-46) + agendado juntos OK")
+
+# 8c) v5.82: job SEM a chave print_barcode (trigger do banco / create_public_order / print-job-create)
+#     obedece ao ajuste da loja vindo do poll; chave presente no job sempre vence; bytes compativeis.
+_pb_antes = A._print_barcode_servidor
+try:
+    A._print_barcode_servidor = True
+    o = A._fmt(copy.deepcopy(dict(sched, itens=[it])), "order", "receipt").split("\n")
+    assert "[[EAN13:7891000100103]]" in o, "job sem a chave + loja LIGADA => barras"
+    o = A._fmt(copy.deepcopy(dict(sched, itens=[it], print_barcode=False)), "order", "receipt").split("\n")
+    assert "  Cod: 7891000100103" in o and "[[EAN13:7891000100103]]" not in o, "print_barcode=False no job vence a loja"
+    A._print_barcode_servidor = False
+    o = A._fmt(copy.deepcopy(dict(sched, itens=[it])), "order", "receipt").split("\n")
+    assert "  Cod: 7891000100103" in o, "loja desligada => texto"
+    o = A._fmt(copy.deepcopy(dict(sched, itens=[it], print_barcode=True)), "order", "receipt").split("\n")
+    assert "[[EAN13:7891000100103]]" in o, "print_barcode=True no job vence a loja desligada"
+    A._print_barcode_servidor = None
+    o = A._fmt(copy.deepcopy(dict(sched, itens=[it])), "order", "receipt").split("\n")
+    assert "  Cod: 7891000100103" in o, "sem chave e sem ajuste => texto (nenhuma loja muda sem pedir)"
+    # comanda de cozinha: mesma regra de precedencia do cupom (comportamento da v5.80/5.81 mantido:
+    # a comanda tambem leva a linha do codigo quando o item tem codigo)
+    A._print_barcode_servidor = True
+    k = A._fmt(copy.deepcopy(dict(sched, itens=[it])), "kitchen", "kitchen")
+    k2 = A._fmt(copy.deepcopy(dict(sched, itens=[it], print_barcode=True)), "kitchen", "kitchen")
+    assert k == k2, "comanda: job sem a chave + loja ligada == job com print_barcode=True"
+    assert A._flag_print_barcode({"print_barcode": "true"}) is False, "so booleano True liga"
+    assert A._flag_print_barcode(None) is False
+finally:
+    A._print_barcode_servidor = _pb_antes
+# bytes: funcao A (GS k 2 ... NUL), sem HRI da impressora, numero em texto logo abaixo, sem LF final
+b = A._escpos_barcode_ean13("7891000100103")
+assert b.startswith(bytes([0x1d, 0x68])), "GS h (altura) primeiro"
+assert bytes([0x1d, 0x77, 3]) in b, "GS w 3 (modulo 3 pontos)"
+assert bytes([0x1d, 0x48, 0]) in b, "GS H 0: HRI da impressora desligado"
+assert b"\x1d\x6b\x02" + b"7891000100103" + b"\x00" in b, "GS k m=2 + 13 digitos + NUL (funcao A)"
+assert b"\x1d\x6b\x43" not in b, "funcao B (m=67) nao e mais usada"
+assert b.endswith(b"  Cod: 7891000100103"), "numero legivel em texto e sem LF final (o join poe)"
+assert b.count(b"\n") == 1, "exatamente um LF entre as barras e o texto"
+m = A._substituir_marcadores_escpos("[[EAN13:7891000100103]]\n")
+assert m.startswith(b"\x1d\x68") and m.endswith(b"  Cod: 7891000100103\n"), "marcador vira barras + texto + LF do join"
+assert A._valida_ean13("7899026422315") and A._valida_ean13("7899026401792"), "EANs reais da Emy validam"
+assert not A._valida_ean13("7899026422316"), "digito verificador errado reprova"
+print("8c) v5.82: fallback do ajuste da loja + bytes EAN-13 funcao A com numero em texto OK")
 
 # 9) Cupom em 42 colunas: nenhuma linha passa de 42 e o preco alinha na coluna 42
 o = A._fmt(copy.deepcopy(dict(sched, paper_width="42")), "order", "receipt").split("\n")
