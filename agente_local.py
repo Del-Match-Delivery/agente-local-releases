@@ -214,6 +214,20 @@ def salvar_config(c):
 
 cfg = carregar_config()
 
+# v5.81: a escala de fonte ganhou o passo "Media" (altura dupla, GS ! 0x01) entre o normal e o
+# 2x2. A escala antiga era 0/1/2 = normal/2x2/3x3; a nova e 0/1/2/3 = normal/media/grande/extra.
+# Migra o valor salvo UMA vez (flag fonte_v2) para a loja que ja usava "Grande" continuar
+# imprimindo no MESMO tamanho de antes (2x2), e nao cair para altura dupla sem ninguem pedir.
+if isinstance(cfg, dict) and not cfg.get("fonte_v2"):
+    if cfg.get("font_size") in (1, 2, "1", "2"):
+        cfg["font_size"] = int(cfg["font_size"]) + 1
+    cfg["fonte_v2"] = True
+    # So persiste se e uma config de verdade (mesma regra do migrador de pastas): salvar um
+    # esqueleto vazio aqui criaria config.json antes das boas-vindas.
+    if cfg.get("token") or cfg.get("restaurant_id"):
+        try: salvar_config(cfg)
+        except Exception: pass
+
 def listar_impressoras_windows():
     if HAS_WIN32:
         try: return [p[2] for p in win32print.EnumPrinters(
@@ -776,35 +790,110 @@ def _bytes_teste_acentos():
     out.extend(b"\n\n\n\n\x1b\x64\x05\x1d\x56\x00")
     return bytes(out)
 
+# ---------------------------------------------------------------------------
+# TAMANHO DA LETRA (v5.81). Escala de 4 passos:
+#   0=Normal   1=Media (GS ! 0x01: altura 2x, LARGURA normal — nenhuma coluna se perde)
+#   2=Grande (GS ! 0x11: 2x2, metade das colunas)   3=Extra (GS ! 0x22: 3x3, um terco)
+# Ate a v5.80 o tamanho configurado so valia ate o primeiro destaque: o [[BIG_ORDER_OFF]]
+# ZERAVA o GS ! (0x00) em vez de voltar ao tamanho base — por isso "so o cabecalho saia
+# grande" (reclamacao de loja, 01/10/2026). Agora todo OFF restaura o tamanho BASE, e a
+# fonte pode ser POR IMPRESSORA (imp["font_size"]), com o mesmo padrao threading.local do
+# codepage (a impressao roda na thread do poll, o teste na da GUI).
+_FONTE_GS    = (0x00, 0x01, 0x11, 0x22)   # GS ! por escala
+_FONTE_WMUL  = (1, 1, 2, 3)               # multiplicador de LARGURA por escala
+_FONTE_NOMES = ("Normal", "Media", "Grande", "Extra")
+_fonte_local = threading.local()
+
+def _fonte_valida(v):
+    """Escala de fonte valida (0..3) ou None. Aceita int/str; lixo => None."""
+    try:
+        n = int(str(v).strip())
+        return n if 0 <= n <= 3 else None
+    except Exception:
+        return None
+
+def _fonte_cfg():
+    v = _fonte_valida(cfg.get("font_size"))
+    return v if v is not None else 0
+
+def _fonte_da_impressora(imp):
+    """Escala efetiva de uma impressora: imp['font_size'] > cfg['font_size'] > normal."""
+    v = _fonte_valida((imp or {}).get("font_size"))
+    return v if v is not None else _fonte_cfg()
+
+def _fonte_atual():
+    """Escala em uso: a da impressora da vez (_usar_fonte), senao cfg['font_size']."""
+    o = getattr(_fonte_local, "fs", None)
+    return o if o is not None else _fonte_cfg()
+
+class _usar_fonte:
+    """with _usar_fonte(2): ... — formata/imprime nessa escala nesta thread."""
+    def __init__(self, fs): self.fs = _fonte_valida(fs)
+    def __enter__(self):
+        self.ant = getattr(_fonte_local, "fs", None); _fonte_local.fs = self.fs; return self
+    def __exit__(self, *a):
+        _fonte_local.fs = self.ant; return False
+
+def _gs_fonte(n):
+    """GS ! da escala n (ja validada ou None=normal)."""
+    return bytes([0x1d, 0x21, _FONTE_GS[_fonte_valida(n) or 0]])
+
+def _fonte_secao(nome):
+    """Escala configurada para uma secao do cupom (cfg['fonte_secoes']) ou None = herda a base."""
+    return _fonte_valida((cfg.get("fonte_secoes") or {}).get(nome))
+
+def _fonte_que_cabe(escala, texto, w_fis):
+    """Reduz a escala ate a linha caber na largura FISICA do papel (texto nao quebra no meio
+    de um numero de pedido ou de um total). Media (wmul 1) sempre cabe."""
+    s = _fonte_valida(escala) or 0
+    while s > 0 and len(str(texto)) * _FONTE_WMUL[s] > w_fis:
+        s -= 1
+    return s
+
+def _escpos_estilo_base():
+    """Estilo geral do cupom alem do tamanho (v5.81): negrito em tudo (impressora que sai
+    'fraca'), reforco de passada dupla (ESC G, papel apagado) e espaco entre linhas (ESC 3).
+    Tudo opt-in: config ausente = bytes vazios = cupom identico ao de antes."""
+    p = b""
+    if cfg.get("negrito_cupom"): p += b"\x1b\x45\x01"
+    if cfg.get("mais_escuro"):   p += b"\x1b\x47\x01"
+    el = cfg.get("espaco_linhas")
+    if el == 0:   p += b"\x1b\x33\x18"   # compacto (24/180")
+    elif el == 2: p += b"\x1b\x33\x28"   # espacado (40/180")
+    return p
+
 def _escpos_font_prefix():
-    """Retorna bytes ESC/POS para o tamanho de fonte configurado (0=normal,1=duplo,2=triplo)."""
-    n = int(cfg.get("font_size", 0))
-    if n <= 0:
-        return b"\x1b\x21\x00"  # normal
-    if n == 1:
-        return b"\x1d\x21\x11"  # largura+altura duplos
-    return b"\x1d\x21\x22"      # largura+altura triplos
+    """Bytes ESC/POS do estado BASE do cupom (tamanho da impressora da vez + estilo geral).
+    Mandado uma vez no inicio do payload; os marcadores [[FSB]]/OFF voltam para este estado."""
+    n = _fonte_atual()
+    return b"\x1b\x21\x00" + (_gs_fonte(n) if n > 0 else b"") + _escpos_estilo_base()
 
-_ESCPOS_BIG_ON  = b"\x1b\x61\x01\x1b\x45\x01\x1d\x21\x11"  # center + bold on + 2x2
-_ESCPOS_BIG_OFF = b"\x1d\x21\x00\x1b\x45\x00\x1b\x61\x00"  # normal + bold off + left
-_MARCADOR_ON_PLACEHOLDER  = "\x01\x02BIG_ON\x02\x01"   # bytes de controle improváveis em texto real
-_MARCADOR_OFF_PLACEHOLDER = "\x01\x02BIG_OFF\x02\x01"
+def _escpos_sufixo():
+    """Avanco + corte do fim do cupom, configuraveis (v5.81). Mantem o formato historico
+    '\\n'*n + ESC d n (ha impressora que ignora um dos dois) + GS V. Config ausente = os
+    MESMOS bytes de sempre (5 linhas + corte total). Fiscal NAO usa isto: o corte do DANFE
+    tem regra propria de zona de silencio do QR."""
+    try: n = max(0, min(8, int(cfg.get("avanco_linhas", 5))))
+    except Exception: n = 5
+    p = b"\n" * n + (bytes([0x1b, 0x64, n]) if n else b"")
+    c = str(cfg.get("corte", "total"))
+    if c == "parcial": p += b"\x1d\x56\x01"
+    elif c != "nao":   p += b"\x1d\x56\x00"
+    return p
 
-# Negrito centralizado em tamanho NORMAL. Usado pelo aviso "NAO E DOCUMENTO FISCAL", que
-# precisa ser destacado mas NAO pode dobrar de tamanho (o [[BIG_ORDER_*]] e 2x2 e estouraria
-# a largura do papel de 58 mm).
-_ESCPOS_NEG_ON  = b"\x1b\x61\x01\x1b\x45\x01"              # center + bold on
-_ESCPOS_NEG_OFF = b"\x1b\x45\x00\x1b\x61\x00"              # bold off + left
-_MARCADOR_NEG_ON_PLACEHOLDER  = "\x01\x02NEG_ON\x02\x01"
-_MARCADOR_NEG_OFF_PLACEHOLDER = "\x01\x02NEG_OFF\x02\x01"
+def _bytes_restaura_base():
+    """Fim de um destaque: volta ao estado BASE do cupom — tamanho base (NAO 0x00: era esse
+    reset que fazia 'so o cabecalho sair grande' ate a v5.80), negrito conforme o geral, left."""
+    neg = b"\x1b\x45\x01" if cfg.get("negrito_cupom") else b"\x1b\x45\x00"
+    return _gs_fonte(_fonte_atual()) + neg + b"\x1b\x61\x00"
 
-# Negrito centralizado em ALTURA dupla e largura NORMAL (GS ! 0x01). Usado pelo destaque de
-# pedido AGENDADO (v5.79): em 2x2 a linha "AGENDADO: 24/09 AS 19:00" (24 chars) so cabe em
-# impressora de 48 colunas; em 42 colunas (cabeca de 512 pontos, muito comum) ela quebrava no
-# meio do horario — "...AS 19" / ":00" — visto em loja em 24/09/2026. Altura dupla mantem o
-# destaque e cabe em qualquer papel de 24+ colunas sem quebrar.
-_ESCPOS_ALTO_ON  = b"\x1b\x61\x01\x1b\x45\x01\x1d\x21\x01"  # center + bold on + altura 2x
-_ESCPOS_ALTO_OFF = b"\x1d\x21\x00\x1b\x45\x00\x1b\x61\x00"  # normal + bold off + left
+def _bytes_big_on():
+    """Destaque do PEDIDO # (center + bold + fonte da secao 'pedido'). Sem config da secao,
+    usa Grande (2x2, o historico) ou a base do cupom se ela for maior — o numero do pedido
+    nunca sai MENOR que o corpo."""
+    v = _fonte_secao("pedido")
+    if v is None: v = max(2, _fonte_atual())
+    return b"\x1b\x61\x01\x1b\x45\x01" + _gs_fonte(v)
 
 _ALIASES_CODIGO_ITEM = ("barcode","codigo","codigo_produto","codigo_barras","cod_barras","sku","ean","ean13")
 
@@ -890,11 +979,14 @@ def _tem_marcador(texto):
     return isinstance(texto, str) and bool(_MARCADOR_RE.search(texto))
 
 def _substituir_marcadores_escpos(texto):
-    """Substitui marcadores '[[BIG_ORDER_ON/OFF]]', '[[NEG_ON/OFF]]', '[[ALTO_ON/OFF]]' e '[[EAN13:codigo]]' por
-    bytes ESC/POS reais. Percorre o texto em blocos: trechos comuns sao normalizados e
+    """Substitui marcadores '[[BIG_ORDER_ON/OFF]]', '[[NEG_ON/OFF]]', '[[ALTO_ON/OFF]]',
+    '[[FS0..FS3]]'/'[[FSB]]' (tamanho por secao, v5.81) e '[[EAN13:codigo]]' por bytes
+    ESC/POS reais. Percorre o texto em blocos: trechos comuns sao normalizados e
     codificados no codepage da impressora (_enc), marcadores viram bytes crus diretamente —
     o EAN-13 tem conteudo variavel (o codigo), entao nao da pra usar placeholder fixo como
-    os outros. Se nao houver marcador, retorna direto o encode (caminho rapido)."""
+    os outros. Se nao houver marcador, retorna direto o encode (caminho rapido).
+    Os OFF sao calculados NA HORA (e nao constantes) porque restauram o estado BASE do
+    cupom, que depende da fonte da impressora da vez e do negrito geral."""
     if not isinstance(texto, str):
         # Blindagem: se por algum motivo veio None/bytes/outro tipo, converte
         texto = str(texto) if texto is not None else ""
@@ -906,12 +998,17 @@ def _substituir_marcadores_escpos(texto):
         if m.start() > pos:
             partes.append(_enc(_txt(texto[pos:m.start()])))
         tag = m.group(1)
-        if tag == "BIG_ORDER_ON": partes.append(_ESCPOS_BIG_ON)
-        elif tag == "BIG_ORDER_OFF": partes.append(_ESCPOS_BIG_OFF)
-        elif tag == "NEG_ON": partes.append(_ESCPOS_NEG_ON)
-        elif tag == "NEG_OFF": partes.append(_ESCPOS_NEG_OFF)
-        elif tag == "ALTO_ON": partes.append(_ESCPOS_ALTO_ON)     # v5.79: destaque AGENDADO (altura dupla)
-        elif tag == "ALTO_OFF": partes.append(_ESCPOS_ALTO_OFF)
+        if tag == "BIG_ORDER_ON": partes.append(_bytes_big_on())
+        elif tag == "BIG_ORDER_OFF": partes.append(_bytes_restaura_base())
+        elif tag == "NEG_ON": partes.append(b"\x1b\x61\x01\x1b\x45\x01")   # center + bold, tamanho intacto
+        elif tag == "NEG_OFF":
+            partes.append((b"\x1b\x45\x01" if cfg.get("negrito_cupom") else b"\x1b\x45\x00") + b"\x1b\x61\x00")
+        # AGENDADO (v5.79): SEMPRE altura dupla/largura normal — e o unico destaque garantido
+        # de caber em qualquer papel de 24+ colunas sem quebrar o horario no meio.
+        elif tag == "ALTO_ON": partes.append(b"\x1b\x61\x01\x1b\x45\x01\x1d\x21\x01")
+        elif tag == "ALTO_OFF": partes.append(_bytes_restaura_base())
+        elif tag == "FSB": partes.append(_bytes_restaura_base())
+        elif tag.startswith("FS"): partes.append(_gs_fonte(int(tag[2])))   # tamanho por secao (v5.81)
         elif tag.startswith("EAN13:"): partes.append(_escpos_barcode_ean13(tag.split(":",1)[1]))
         pos = m.end()
     if pos < len(texto):
@@ -928,7 +1025,7 @@ def _imprimir_raw(nome, conteudo):
 
                 # Se for string, codifica com prefixo de tamanho de fonte. Se for bytes (RAW), envia direto.
                 if isinstance(conteudo, str):
-                    corpo = _substituir_marcadores_escpos(conteudo + "\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")
+                    corpo = _substituir_marcadores_escpos(conteudo) + _escpos_sufixo()
                     # ESC t antes do texto: sem isso a impressora fica no PC437 e os acentos quebram
                     payload = _escpos_cp() + _escpos_font_prefix() + corpo
                     win32print.WritePrinter(h, payload)
@@ -953,7 +1050,7 @@ def _imprimir_tcp(endereco, conteudo):
             host, porta = endereco, 9100
         with socket.create_connection((host, porta), timeout=10) as s:
             if isinstance(conteudo, str):
-                corpo = _substituir_marcadores_escpos(conteudo + "\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")
+                corpo = _substituir_marcadores_escpos(conteudo) + _escpos_sufixo()
                 # ESC t antes do texto: sem isso a impressora fica no PC437 e os acentos quebram
                 payload = _escpos_cp() + _escpos_font_prefix() + corpo
             else:
@@ -1665,7 +1762,9 @@ TIPOS_CUPOM_FISCAL  = {"fiscal", "danfce"}
 # Ajuste SINIEF 32/24, em vigor desde 01/02/2025: todo impresso entregue ao consumidor que
 # NAO seja documento fiscal precisa dizer isso. Sem esse aviso o cliente leva um papel com
 # itens e total achando que recebeu nota.
-AVISO_NAO_FISCAL = "[[NEG_ON]]NÃO É DOCUMENTO FISCAL[[NEG_OFF]]"
+# FS0/FSB: o aviso fica em tamanho NORMAL mesmo com o cupom em fonte grande (23 caracteres
+# em 2x nao cabem no papel de 58 mm) — e exigencia de layout, nao estetica (SINIEF 32/24).
+AVISO_NAO_FISCAL = "[[NEG_ON]][[FS0]]NÃO É DOCUMENTO FISCAL[[FSB]][[NEG_OFF]]"
 
 def _escpos_qr(dados, modulo=5):
     """QR Code pelo comando NATIVO da impressora (GS ( k) — nao bitmap: imprime mais rapido e
@@ -1698,10 +1797,12 @@ def _fv(v):
 def _wrap_linhas(texto, w, indent=""):
     """Quebra texto em linhas de no maximo w colunas sem cortar palavra no meio. Palavra maior
     que a largura e fatiada (URL de consulta, descricao de produto sem espaco).
-    Truncar nao e opcao aqui: campo do DANFE cortado no meio e documento errado."""
+    Truncar nao e opcao aqui: campo do DANFE cortado no meio e documento errado.
+    Piso 4 (era 8): com fonte Extra em papel de 58 mm sobram 10 colunas logicas, e o piso 8
+    somado ao recuo de continuacao (4) gerava linha de 12 — estourava a largura fisica."""
     if texto is None:
         return []
-    largura = max(8, w - len(indent))
+    largura = max(4, w - len(indent))
     out = []
     for bruto in str(texto).split("\n"):
         palavras = bruto.split()
@@ -1986,16 +2087,15 @@ def _fmt(content, jt, pt, imp=None):
     # impressora resolvida em proc_job; chamadas sem impressora (teste/reimpressao) pulam o 1.
     w = _largura_efetiva(imp, content, _paper_width_servidor)
     w_fis = w   # largura FISICA do papel; w pode ser reduzido abaixo por font_size (so receipt)
-    _fs = int(cfg.get("font_size", 0))
+    # v5.81: fonte POR IMPRESSORA (imp['font_size'] > cfg['font_size']), escala 0..3.
+    _fs = _fonte_da_impressora(imp)
     # Para cozinha/bar: nao reduz w — todos os detalhes sempre aparecem.
     # Fonte grande so no nome do item (inline via ESC/POS); addons/obs em normal.
     # Para receipt: reduz w para alinhar colunas de preco com a fonte maior.
+    # 'Media' (altura dupla) tem wmul 1: a letra cresce e NENHUMA coluna se perde.
     _is_kitchen = jt in ("kitchen","bar") or pt in ("kitchen","bar")
     if not _is_kitchen:
-        if _fs == 1:
-            w = w // 2
-        elif _fs >= 2:
-            w = w // 3
+        w = max(8, w // _FONTE_WMUL[_fs])
     S="-"*w
     # v5.82: interruptor do codigo de barras decidido UMA vez por cupom (content > ajuste da loja via
     # poll > desligado) e registrado no log — para nunca mais depurar isto no escuro.
@@ -2041,7 +2141,7 @@ def _fmt(content, jt, pt, imp=None):
         # store_name antes do cfg: numa rede, cfg e a MATRIZ, e o cupom da filial tem que
         # sair com o nome de quem vendeu. company_name (razao social) segue tendo prioridade.
         ne=content.get("company_name","") or _loja_do_job(content) or cfg.get("restaurant_name","")
-        if ne: ll.append(ne.upper().center(w))
+        if ne: ll += _lin_centro(ne.upper(), "loja")
         e=content.get("company_address","")
         if e: ll.append(e.center(w))
         t=content.get("company_phone","")
@@ -2051,7 +2151,7 @@ def _fmt(content, jt, pt, imp=None):
         _selo=_linhas_selo_loja(content, w)
         if _selo: ll += _selo + [S]
         n=content.get("numero","") or content.get("order_number","")
-        if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
+        if n: ll.append(_lin_pedido(n))
         data_brt,_=_data_hora_brt(content)   # BRT: created_at_brt do servidor ou created_at (UTC) convertido
         if data_brt: ll.append(f"Data: {data_brt}")
         tp=content.get("order_type","")
@@ -2076,7 +2176,7 @@ def _fmt(content, jt, pt, imp=None):
             ll += _cab_categoria(_cat, w)
             for item in _itens_cat:
                 size=_size_do_item(item)
-                ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
+                ll += _lin_item(item)
                 ll += _linha_pai(item)
                 _cod_ln=_linha_codigo_item(item, _barcode_on)
                 if _cod_ln: ll.append(_cod_ln)
@@ -2091,13 +2191,12 @@ def _fmt(content, jt, pt, imp=None):
         ll.append(S)
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         ent=content.get("delivery_fee_cents",0); tot=content.get("total_cents",0)
-        if sub:
-            sv=_R(sub); ll.append(f"{'Subtotal:':<{w-len(sv)}}{sv}")
-        if desc and int(desc)>0:
-            dv=f"-{_R(desc)}"; ll.append(f"{'Desconto:':<{w-len(dv)}}{dv}")
-        if ent and int(ent)>0:
-            ev=_R(ent); ll.append(f"{'Taxa entrega:':<{w-len(ev)}}{ev}")
-        tv=_R(tot); ll.append(f"{'TOTAL:':<{w-len(tv)}}{tv}")
+        # v5.81: _par empilha o valor quando nao cabe ao lado do rotulo (fonte Extra em 58 mm
+        # deixa 10 colunas; antes o f-string gerava linha maior que o papel e quebrava no meio).
+        if sub: ll += _par("Subtotal:", _R(sub), w)
+        if desc and int(desc)>0: ll += _par("Desconto:", f"-{_R(desc)}", w)
+        if ent and int(ent)>0: ll += _par("Taxa entrega:", _R(ent), w)
+        ll += _lin_valor("TOTAL:", _R(tot), "total")
         pg=content.get("payment_method","")
         if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
         cod=content.get("pickup_code","")
@@ -2107,7 +2206,7 @@ def _fmt(content, jt, pt, imp=None):
         # Endereço de entrega (delivery) — bloco robusto que aceita varios nomes de campo
         ll += _bloco_endereco(content, w, titulo="ENTREGA:")
         rod=content.get("footer_message","")
-        if rod: ll.append(S); ll.append(rod.center(w))
+        if rod: ll.append(S); ll += _lin_centro(rod, "rodape")
         ll.append(S)
     elif tipo in ("kitchen","bar"):
         titulo = "COZINHA" if tipo=="kitchen" else "BAR"
@@ -2121,7 +2220,7 @@ def _fmt(content, jt, pt, imp=None):
         # existe aqui — quem esta na chapa tem que ler a loja antes de qualquer outra coisa.
         cab += _linhas_selo_loja(content, w)
         n=content.get("numero","") or content.get("order_number","")
-        if n: cab.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
+        if n: cab.append(_lin_pedido(n))
         # AGENDADO dentro do bloco grande (2x2), junto do numero/tipo/mesa: e o dado que define
         # se o item entra em producao AGORA ou depois — quem esta na chapa le antes dos itens.
         cab += _linhas_agendado(content, w_fis)
@@ -2168,17 +2267,22 @@ def _fmt(content, jt, pt, imp=None):
             # Fonte grande: retorna bytes com comandos ESC/POS inline.
             # Cabecalho e detalhes (addons, obs) em normal; nome do item em grande.
             FNORMAL = b"\x1b\x21\x00"
-            FBIG    = _escpos_font_prefix()
+            FBIG    = _gs_fonte(_fs)
             DP_str  = "."*w
             # ESC t primeiro: este caminho devolve bytes e vai direto pra impressora,
             # sem passar pelo prefixo montado em _imprimir_raw/_imprimir_tcp.
-            parts = [_escpos_cp(), FNORMAL]
+            # Estilo geral (negrito/escuro/espaco) tambem entra aqui pelo mesmo motivo.
+            parts = [_escpos_cp(), FNORMAL, _escpos_estilo_base()]
             enc = lambda s: _enc(_txt(s)+"\n")
             encq = lambda s: b"".join(enc(x) for x in _quebrar_linhas_longas([s], w))   # v5.80: quebra na palavra
             for linha in cab:
                 if _tem_marcador(linha):
-                    # Substitui marcadores por bytes ESC/POS reais
+                    # Substitui marcadores por bytes ESC/POS reais. FNORMAL em seguida: na
+                    # comanda a fonte base vale SO para o nome do item; o [[FSB]] do marcador
+                    # restaura a base da impressora e sem este reset o resto do cabecalho
+                    # sairia grande e estouraria a largura (formatado em w cheio).
                     parts.append(_substituir_marcadores_escpos(linha + "\n"))
+                    parts.append(FNORMAL)
                 else:
                     parts.append(encq(linha))
             itens=_itens_do_content(content)
@@ -2192,7 +2296,11 @@ def _fmt(content, jt, pt, imp=None):
                     size=_size_do_item(item)
                     nome=_nome_com_tamanho(item)
                     parts.append(FBIG)
-                    parts.append(enc(f"[ {q}x ]  {nome}"))
+                    # Quebra NA PALAVRA na largura logica da fonte (v5.81): em 2x2 cada letra
+                    # ocupa 2 colunas e um nome comprido estourava o papel — a impressora
+                    # quebrava no meio da palavra ("Calabre"/"sa").
+                    for _lx in _quebrar_linhas_longas([f"[ {q}x ]  {nome}"], max(8, w // _FONTE_WMUL[_fs])):
+                        parts.append(enc(_lx))
                     parts.append(FNORMAL)
                     for linha in _linha_pai(item): parts.append(enc(linha))
                     _cod_ln=_linha_codigo_item(item, _barcode_on)
@@ -2212,7 +2320,7 @@ def _fmt(content, jt, pt, imp=None):
                 parts.append(encq(f"OBS: {obs2}"))
             parts.append(enc(S))
             parts.append(FNORMAL)
-            parts.append(b"\n\n\n\n\n\x1b\x64\x05\x1d\x56\x00")  # avanço + corte
+            parts.append(_escpos_sufixo())  # avanço + corte (configuraveis desde a v5.81)
             return b"".join(parts)
     elif tipo=="pickup":
         # Ajuste SINIEF 32/24: cupom sem NFC-e autorizada avisa que nao e documento fiscal
@@ -2220,7 +2328,7 @@ def _fmt(content, jt, pt, imp=None):
         # store_name antes do cfg: numa rede, cfg e a MATRIZ, e o cupom da filial tem que
         # sair com o nome de quem vendeu. company_name (razao social) segue tendo prioridade.
         ne=content.get("company_name","") or _loja_do_job(content) or cfg.get("restaurant_name","")
-        if ne: ll.append(ne.upper().center(w))
+        if ne: ll += _lin_centro(ne.upper(), "loja")
         e=content.get("company_address","")
         if e: ll.append(e.center(w))
         ll.append(S)
@@ -2228,7 +2336,7 @@ def _fmt(content, jt, pt, imp=None):
         _selo=_linhas_selo_loja(content, w)
         if _selo: ll += _selo + [S]
         n=content.get("numero","") or content.get("order_number","")
-        if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
+        if n: ll.append(_lin_pedido(n))
         data_brt,_=_data_hora_brt(content)   # BRT: created_at_brt do servidor ou created_at (UTC) convertido
         if data_brt: ll.append(f"Data: {data_brt}")
         tp=content.get("order_type","")
@@ -2248,7 +2356,7 @@ def _fmt(content, jt, pt, imp=None):
             ll += _cab_categoria(_cat, w)
             for item in _itens_cat:
                 size=_size_do_item(item)
-                ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
+                ll += _lin_item(item)
                 ll += _linha_pai(item)
                 _cod_ln=_linha_codigo_item(item, _barcode_on)
                 if _cod_ln: ll.append(_cod_ln)
@@ -2263,11 +2371,9 @@ def _fmt(content, jt, pt, imp=None):
         ll.append(S)
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         tot=content.get("total_cents",0)
-        if sub:
-            sv=_R(sub); ll.append(f"{'Subtotal:':<{w-len(sv)}}{sv}")
-        if desc and int(desc)>0:
-            dv=f"-{_R(desc)}"; ll.append(f"{'Desconto:':<{w-len(dv)}}{dv}")
-        tv=_R(tot); ll.append(f"{'TOTAL:':<{w-len(tv)}}{tv}")
+        if sub: ll += _par("Subtotal:", _R(sub), w)
+        if desc and int(desc)>0: ll += _par("Desconto:", f"-{_R(desc)}", w)
+        ll += _lin_valor("TOTAL:", _R(tot), "total")
         pg=content.get("payment_method","")
         if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
         obs2=content.get("notes","")
@@ -2279,7 +2385,7 @@ def _fmt(content, jt, pt, imp=None):
         # store_name antes do cfg: numa rede, cfg e a MATRIZ, e o cupom da filial tem que
         # sair com o nome de quem vendeu. company_name (razao social) segue tendo prioridade.
         ne=content.get("company_name","") or _loja_do_job(content) or cfg.get("restaurant_name","")
-        if ne: ll.append(ne.upper().center(w))
+        if ne: ll += _lin_centro(ne.upper(), "loja")
         e=content.get("company_address","")
         if e: ll.append(e.center(w))
         ll.append(S)
@@ -2287,7 +2393,7 @@ def _fmt(content, jt, pt, imp=None):
         _selo=_linhas_selo_loja(content, w)
         if _selo: ll += _selo + [S]
         n=content.get("numero","") or content.get("order_number","")
-        if n: ll.append(f"[[BIG_ORDER_ON]]PEDIDO #{n}[[BIG_ORDER_OFF]]")
+        if n: ll.append(_lin_pedido(n))
         data_brt,_=_data_hora_brt(content)   # BRT: created_at_brt do servidor ou created_at (UTC) convertido
         if data_brt: ll.append(f"Data: {data_brt}")
         tp=content.get("order_type","delivery")
@@ -2305,7 +2411,7 @@ def _fmt(content, jt, pt, imp=None):
             ll += _cab_categoria(_cat, w)
             for item in _itens_cat:
                 size=_size_do_item(item)
-                ll.append(_li(_qtd_do_item(item), _nome_com_tamanho(item), _preco_do_item(item), w))
+                ll += _lin_item(item)
                 ll += _linha_pai(item)
                 _cod_ln=_linha_codigo_item(item, _barcode_on)
                 if _cod_ln: ll.append(_cod_ln)
@@ -2320,13 +2426,10 @@ def _fmt(content, jt, pt, imp=None):
         ll.append(S)
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         ent=content.get("delivery_fee_cents",0); tot=content.get("total_cents",0)
-        if sub:
-            sv=_R(sub); ll.append(f"{'Subtotal:':<{w-len(sv)}}{sv}")
-        if desc and int(desc)>0:
-            dv=f"-{_R(desc)}"; ll.append(f"{'Desconto:':<{w-len(dv)}}{dv}")
-        if ent and int(ent)>0:
-            ev=_R(ent); ll.append(f"{'Taxa entrega:':<{w-len(ev)}}{ev}")
-        tv=_R(tot); ll.append(f"{'TOTAL:':<{w-len(tv)}}{tv}")
+        if sub: ll += _par("Subtotal:", _R(sub), w)
+        if desc and int(desc)>0: ll += _par("Desconto:", f"-{_R(desc)}", w)
+        if ent and int(ent)>0: ll += _par("Taxa entrega:", _R(ent), w)
+        ll += _lin_valor("TOTAL:", _R(tot), "total")
         pg=content.get("payment_method","")
         if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
         obs2=content.get("notes","")
@@ -2563,8 +2666,10 @@ def proc_job(job):
     if dados is None:
         # Formatacao NUNCA pode impedir a impressao. Se _fmt levantar excecao, imprime um cupom minimo.
         try:
-            with _usar_codepage(_cp_da_impressora(imp)):
-                dados=_fmt(content,jt,pt,imp)   # imp: largura/codepage por impressora (v5.79/5.80)
+            # fonte junto do codepage (v5.81): o prefixo/os marcadores lidos na impressao
+            # usam a fonte DESTA impressora, nao a global.
+            with _usar_codepage(_cp_da_impressora(imp)), _usar_fonte(_fonte_da_impressora(imp)):
+                dados=_fmt(content,jt,pt,imp)   # imp: largura/codepage/fonte por impressora
             _fmt_ok = True
         except Exception as e:
             # EXCECAO da regra acima: cupom fiscal nao tem "cupom minimo". Um papel com
@@ -2602,21 +2707,31 @@ def proc_job(job):
     for _imp in imps_alvo:
         _nome = _imp.get("nome_impressora") or _imp.get("endereco_ip","")
         ok_imp = True
-        # v5.80: cada impressora com o SEU codepage e a SUA largura. Se diferem da primeira
-        # (usada no _fmt acima), formata de novo so para esta — senao a mini de 58 mm herdaria
-        # a tabela/largura da impressora do caixa.
+        # v5.80: cada impressora com o SEU codepage e a SUA largura; v5.81 idem para a FONTE.
+        # Se diferem da primeira (usada no _fmt acima), formata de novo so para esta — senao
+        # a mini de 58 mm herdaria a tabela/largura/fonte da impressora do caixa.
         _cp_imp = _cp_da_impressora(_imp)
+        _fs_imp = _fonte_da_impressora(_imp)
         _dados_imp = dados
         if _fmt_ok and _imp is not imp and (
                 _cp_imp != _cp_da_impressora(imp) or
+                _fs_imp != _fonte_da_impressora(imp) or
                 _largura_efetiva(_imp, content, _paper_width_servidor) != _largura_efetiva(imp, content, _paper_width_servidor)):
             try:
-                with _usar_codepage(_cp_imp):
+                with _usar_codepage(_cp_imp), _usar_fonte(_fs_imp):
                     _dados_imp = _fmt(content,jt,pt,_imp)
             except Exception as e:
                 log.warning(f"[PRINT] Job {jid}: reformatar para '{_nome}' falhou ({e}); usando o da 1a impressora")
-        for _ in range(copies):
-            with _usar_codepage(_cp_imp):
+        # v5.81: vias LOCAIS do cupom do cliente ('vias' da impressora > 'vias_cupom' geral).
+        # So para cupom: comanda de setor e cupom fiscal saem SEMPRE em 1 via (documento e um).
+        # max(copies, local): o servidor pode pedir mais vias que a config local, nunca menos.
+        _vias = copies
+        if pt not in ("kitchen","bar") and jt not in TIPOS_CUPOM_FISCAL and not _tem_fiscal:
+            try:
+                _vias = max(copies, max(1, min(3, int(_imp.get("vias") or cfg.get("vias_cupom") or 1))))
+            except Exception: pass
+        for _ in range(_vias):
+            with _usar_codepage(_cp_imp), _usar_fonte(_fs_imp):
                 r = _imprimir_com_roteamento(_imp, _dados_imp)
             if not r.get("ok"):
                 ok_imp = False
@@ -3481,8 +3596,9 @@ def abrir_dashboard():
                 nome_real = imp.get("nome_impressora") or imp.get("endereco_ip","")
                 log.info(f"[REIMP] Imprimindo em '{nome_real}' pt_uso='{pt_uso}'")
                 # v5.80: reimpressao com a tabela de acentos e a largura DA impressora (antes saia
-                # sempre em cp850/48, e uma mini configurada como utf8 reimprimia com letra errada)
-                with _usar_codepage(_cp_da_impressora(imp)):
+                # sempre em cp850/48, e uma mini configurada como utf8 reimprimia com letra errada).
+                # v5.81: fonte da impressora idem.
+                with _usar_codepage(_cp_da_impressora(imp)), _usar_fonte(_fonte_da_impressora(imp)):
                     texto = _fmt(resp, pt_uso, pt_uso, imp)
                     r = _imprimir_com_roteamento(imp, texto)
                 if r.get("ok"):
@@ -3802,11 +3918,11 @@ def abrir_config(auto=False):
     tk.Label(inf2,text="DUPLO CLIQUE em uma linha para editar a Impressora Windows.\nVermelho = sem mapeamento.  caixa=receipt | cozinha=kitchen | bar=bar",
              bg="#313244",fg="#a6c8e0",font=("Segoe UI",9),pady=6,wraplength=750,justify="left").pack()
 
-    cols=("nome","area","impressora_windows","tipo","colunas","acentos")   # v5.79: colunas; v5.80: acentos
+    cols=("nome","area","impressora_windows","tipo","colunas","acentos","fonte")   # v5.79: colunas; v5.80: acentos; v5.81: fonte
     ti=ttk.Treeview(f2,columns=cols,show="headings",height=9)
     for col,lbl,cw in [("nome","Nome Sistema",140),("area","Area",80),
-                        ("impressora_windows","Impressora Windows",280),("tipo","Tipo",90),
-                        ("colunas","Colunas",65),("acentos","Acentos",70)]:
+                        ("impressora_windows","Impressora Windows",250),("tipo","Tipo",90),
+                        ("colunas","Colunas",65),("acentos","Acentos",70),("fonte","Fonte",70)]:
         ti.heading(col,text=lbl); ti.column(col,width=cw)
     sbi=ttk.Scrollbar(f2,orient="vertical",command=ti.yview); ti.configure(yscrollcommand=sbi.set)
     ti.grid(row=1,column=0,columnspan=5,padx=10,pady=5,sticky="nsew"); sbi.grid(row=1,column=5,pady=5,sticky="ns")
@@ -3832,12 +3948,18 @@ def abrir_config(auto=False):
             return "outro_agente"
         return "sem_map"
 
+    def _fonte_rotulo(imp):
+        """Nome da fonte por impressora para a grade ('' = herda o geral)."""
+        v = _fonte_valida(imp.get("font_size"))
+        return _FONTE_NOMES[v].lower() if v is not None else ""
+
     for imp in cfg.get("impressoras",[]):
         tag = _tag_impressora(imp)
         nome_w = imp.get("nome_impressora","") or ("(outro agente)" if tag == "outro_agente" else "")
         ti.insert("",tk.END,values=(imp.get("nome",""),imp.get("area",""),
                                     nome_w, imp.get("tipo","comum_win32"),
-                                    str(imp.get("colunas") or ""), str(imp.get("codepage") or "")),tags=(tag,))
+                                    str(imp.get("colunas") or ""), str(imp.get("codepage") or ""),
+                                    _fonte_rotulo(imp)),tags=(tag,))
 
     ef2=tk.Frame(f2,bg="#2a2a3e",relief="ridge",bd=1); ef2.grid(row=2,column=0,columnspan=6,padx=10,pady=4,sticky="ew")
     tk.Label(ef2,text="Area:",bg="#2a2a3e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).grid(row=0,column=0,padx=(10,4),pady=10)
@@ -3856,6 +3978,11 @@ def abrir_config(auto=False):
     # papel (comum em mini impressora de 58 mm) => 'Testar acentos' e escolher o bloco certo.
     tk.Label(ef2,text="Acentos:",bg="#2a2a3e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).grid(row=1,column=4,padx=4,pady=(0,8),sticky="e")
     eacc=ttk.Combobox(ef2,values=[""]+list(_CP_TESTE),width=8); eacc.grid(row=1,column=5,padx=4,pady=(0,8),sticky="w")
+    # v5.81: fonte POR IMPRESSORA (vazio = herda o tamanho geral da aba Impressao). Deixa a
+    # comanda da cozinha grande sem mexer no cupom do caixa, e vice-versa.
+    _FONTES_COMBO=[""]+[n.lower() for n in _FONTE_NOMES]
+    tk.Label(ef2,text="Fonte:",bg="#2a2a3e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).grid(row=1,column=6,padx=4,pady=(0,8),sticky="e")
+    efnt=ttk.Combobox(ef2,values=_FONTES_COMBO,width=8); efnt.grid(row=1,column=7,padx=(4,10),pady=(0,8),sticky="w")
     tk.Label(ef2,text="Letra errada no papel? Clique 'Testar acentos', veja qual bloco saiu certo e escolha esse em Acentos. "
                       "'ascii' tira os acentos e funciona em qualquer impressora.",
              bg="#2a2a3e",fg="#6c7086",font=("Segoe UI",8),wraplength=760,justify="left").grid(row=2,column=0,columnspan=6,padx=10,pady=(0,8),sticky="w")
@@ -3867,6 +3994,7 @@ def abrir_config(auto=False):
         earea.set(vals[1] if len(vals)>1 else "")
         ecol.set(vals[4] if len(vals)>4 else "")
         eacc.set(vals[5] if len(vals)>5 else "")
+        efnt.set(vals[6] if len(vals)>6 else "")
         eiw.set(vals[2] if len(vals)>2 else ""); eiw.focus()
 
     def aplicar():
@@ -3881,10 +4009,14 @@ def abrir_config(auto=False):
         if acc_txt and not _normaliza_cp(acc_txt):
             messagebox.showwarning("Aviso",f"Acentos: use uma destas opcoes: {', '.join(_CP_TESTE)} (ou deixe vazio).",parent=w); return
         acc_txt=_normaliza_cp(acc_txt)
+        fnt_txt=efnt.get().strip().lower()
+        if fnt_txt and fnt_txt not in _FONTES_COMBO:
+            messagebox.showwarning("Aviso",f"Fonte: use uma destas opcoes: {', '.join(n for n in _FONTES_COMBO if n)} (ou deixe vazio = herda o geral).",parent=w); return
+        fnt_val=_FONTES_COMBO.index(fnt_txt)-1 if fnt_txt else None   # "normal"=0 ... "extra"=3
         vals=ti.item(sel[0],"values")
         area_final = nova_area or vals[1]
-        ti.item(sel[0],values=(vals[0],area_final,nova,vals[3],col_txt,acc_txt),tags=("",))
-        lbe.config(text=f"OK: {vals[0]} -> {nova}",fg="#a6e3a1"); eiw.set(""); earea.set(""); ecol.set(""); eacc.set("")
+        ti.item(sel[0],values=(vals[0],area_final,nova,vals[3],col_txt,acc_txt,fnt_txt),tags=("",))
+        lbe.config(text=f"OK: {vals[0]} -> {nova}",fg="#a6e3a1"); eiw.set(""); earea.set(""); ecol.set(""); eacc.set(""); efnt.set("")
         # Salva imediatamente no cfg e no disco
         nome_sistema = vals[0]
         for imp in cfg.get("impressoras",[]):
@@ -3895,9 +4027,11 @@ def abrir_config(auto=False):
                 else: imp.pop("colunas", None)
                 if acc_txt: imp["codepage"] = acc_txt
                 else: imp.pop("codepage", None)
+                if fnt_val is not None: imp["font_size"] = fnt_val
+                else: imp.pop("font_size", None)
                 break
         salvar_config(cfg)
-        log.info(f"[CONFIG] Impressora '{nome_sistema}' area={area_final} -> '{nova}' colunas={col_txt or 'auto'} acentos={acc_txt or 'padrao'}")
+        log.info(f"[CONFIG] Impressora '{nome_sistema}' area={area_final} -> '{nova}' colunas={col_txt or 'auto'} acentos={acc_txt or 'padrao'} fonte={fnt_txt or 'herda'}")
 
     ti.bind("<Double-1>",duplo)
     tk.Button(ef2,text="Aplicar",command=aplicar,bg="#89b4fa",fg="#1e1e2e",
@@ -3930,8 +4064,10 @@ def abrir_config(auto=False):
         txt2=("="*W+"\n"+f"  {cfg.get('restaurant_name','AGENTE LOCAL')}  ".center(W)+"\n"+
               "  TESTE DE IMPRESSAO OK!  ".center(W)+"\n"+"="*W+"\n"+
               f"Impressora: {nw}\n"+f"Hora: {time.strftime('%d/%m/%Y %H:%M:%S')}\n"+"="*W+"\n")
-        # v5.80: com a tabela de acentos DA LINHA (a mesma que os pedidos usam nessa impressora)
-        with _usar_codepage(_cp_da_impressora({"codepage": vals[5] if len(vals)>5 else ""})):
+        # v5.80: com a tabela de acentos DA LINHA (a mesma que os pedidos usam nessa impressora).
+        # Fonte NORMAL de proposito: este teste valida o MAPEAMENTO (o texto e formatado em W
+        # colunas fixas); o teste de fonte e o "Imprimir cupom de teste" da aba Impressao.
+        with _usar_codepage(_cp_da_impressora({"codepage": vals[5] if len(vals)>5 else ""})), _usar_fonte(0):
             r=_imprimir_raw(nw,txt2)
         if r.get("ok"): messagebox.showinfo("OK",f"Teste enviado:\n{nw}",parent=w)
         else: messagebox.showerror("Erro",r.get("erro",""),parent=w)
@@ -3962,7 +4098,8 @@ def abrir_config(auto=False):
                     tag="" if imp.get("nome_impressora") else "sem_map"
                     ti.insert("",tk.END,values=(imp.get("nome",""),imp.get("area",""),
                                                 imp.get("nome_impressora",""),imp.get("tipo","comum_win32"),
-                                                str(imp.get("colunas") or ""), str(imp.get("codepage") or "")),tags=(tag,))
+                                                str(imp.get("colunas") or ""), str(imp.get("codepage") or ""),
+                                                _fonte_rotulo(imp)),tags=(tag,))
                 messagebox.showinfo("Sincronizado","Impressoras atualizadas do servidor!",parent=w)
             w.after(0,_ui)
         threading.Thread(target=_do, daemon=True).start()
@@ -3975,48 +4112,166 @@ def abrir_config(auto=False):
         tk.Button(bi2,text=tb,command=cb,bg=cor,fg="#1e1e2e",font=("Segoe UI",9,"bold"),
                   relief="flat",padx=10,pady=5,cursor="hand2").pack(side="left",padx=4)
 
-    # Controle de tamanho de fonte ESC/POS
-    _LABELS_FONTE = ["Normal", "Grande", "Extra Grande"]
-    tk.Frame(bi2,bg="#1e1e2e",width=20).pack(side="left")
-    tk.Label(bi2,text="Fonte:",bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).pack(side="left",padx=(0,4))
-    _fs_var = tk.IntVar(value=int(cfg.get("font_size",0)))
-    lbl_fs = tk.Label(bi2,text=_LABELS_FONTE[_fs_var.get()],bg="#313244",fg="#f9e2af",
-                      font=("Segoe UI",9,"bold"),padx=10,pady=5,width=12)
-    lbl_fs.pack(side="left",padx=2)
-    def _set_font_size(delta):
-        v = max(0, min(2, _fs_var.get() + delta))
-        _fs_var.set(v)
-        cfg["font_size"] = v
-        salvar_config(cfg)
-        lbl_fs.config(text=_LABELS_FONTE[v])
-    tk.Button(bi2,text="A-",command=lambda:_set_font_size(-1),bg="#45475a",fg="#cdd6f4",
-              font=("Segoe UI",9,"bold"),relief="flat",padx=8,pady=5,cursor="hand2").pack(side="left",padx=2)
-    tk.Button(bi2,text="A+",command=lambda:_set_font_size(1),bg="#45475a",fg="#cdd6f4",
-              font=("Segoe UI",9,"bold"),relief="flat",padx=8,pady=5,cursor="hand2").pack(side="left",padx=2)
-
-    # Controle de largura do papel: quando o servidor nao manda paper_width no job, o cupom
-    # cai no default de 48 colunas (80mm). Loja com bobina de 58mm precisa deste ajuste local
-    # na instalacao, senao separadores/comanda saem largos demais para o papel (COMP-46).
-    _LARGURAS_PAPEL = [("58mm",32), ("76mm",42), ("80mm",48)]   # v5.79: + 42 colunas (cabeca de 512 pontos)
-    _pw_atual = int(cfg.get("paper_width_cols") or W)
-    _pw_idx0 = min(range(len(_LARGURAS_PAPEL)), key=lambda i: abs(_LARGURAS_PAPEL[i][1] - _pw_atual))
-    tk.Frame(bi2,bg="#1e1e2e",width=20).pack(side="left")
-    tk.Label(bi2,text="Papel:",bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9,"bold")).pack(side="left",padx=(0,4))
-    _pw_var = tk.IntVar(value=_pw_idx0)
-    lbl_pw = tk.Label(bi2,text=_LARGURAS_PAPEL[_pw_idx0][0],bg="#313244",fg="#f9e2af",
-                      font=("Segoe UI",9,"bold"),padx=10,pady=5,width=8)
-    lbl_pw.pack(side="left",padx=2)
-    def _set_paper_width(idx):
-        _pw_var.set(idx)
-        nome,cols = _LARGURAS_PAPEL[idx]
-        cfg["paper_width_cols"] = cols
-        salvar_config(cfg)
-        lbl_pw.config(text=nome)
-    for _i,(_nome,_cols) in enumerate(_LARGURAS_PAPEL):
-        tk.Button(bi2,text=_nome,command=lambda i=_i:_set_paper_width(i),bg="#45475a",fg="#cdd6f4",
-                  font=("Segoe UI",9,"bold"),relief="flat",padx=8,pady=5,cursor="hand2").pack(side="left",padx=2)
-
+    # (v5.81: os controles 'Fonte' e 'Papel' que ficavam aqui viraram a aba 'Impressao',
+    #  junto com os ajustes novos — destaques por secao, estilo, corte, avanco e vias.)
     f2.columnconfigure(0,weight=1); f2.rowconfigure(1,weight=1)
+
+    # ── ABA IMPRESSAO (v5.81): padrao de impressao do cupom. Cada controle salva NA HORA
+    # (mesmo comportamento dos campos da aba Impressoras) e vale para o proximo pedido;
+    # nenhum deles mexe no layout fiscal (DANFE), que tem regras proprias. ──
+    fIm=ttk.Frame(nb); nb.add(fIm,text="Impressao")
+    imroot=tk.Frame(fIm,bg="#1e1e2e"); imroot.pack(fill="both",expand=True)
+    imroot.columnconfigure(0,weight=1); imroot.columnconfigure(1,weight=1)
+
+    def _salva_im(chave, valor):
+        """Salva um ajuste de impressao; None remove a chave (= comportamento padrao)."""
+        if valor is None: cfg.pop(chave, None)
+        else: cfg[chave] = valor
+        salvar_config(cfg)
+        log.info(f"[CONFIG] Impressao: {chave}={'padrao' if valor is None else valor}")
+
+    def _grupo_im(titulo, dica, col, row, colspan=1):
+        g=tk.LabelFrame(imroot,text=f" {titulo} ",bg="#1e1e2e",fg="#f9e2af",
+                        font=("Segoe UI",9,"bold"),bd=1,relief="groove")
+        g.grid(row=row,column=col,columnspan=colspan,padx=8,pady=5,sticky="nsew")
+        if dica:
+            tk.Label(g,text=dica,bg="#1e1e2e",fg="#6c7086",font=("Segoe UI",8),
+                     wraplength=720 if colspan>1 else 350,justify="left").pack(anchor="w",padx=8,pady=(2,2))
+        return g
+
+    def _botoes_escolha(parent, opcoes, idx_atual, ao_escolher):
+        """Fileira de botoes onde um fica aceso (selecionado)."""
+        fr=tk.Frame(parent,bg="#1e1e2e"); fr.pack(anchor="w",padx=8,pady=(2,8))
+        bts=[]
+        def _pinta(i_sel):
+            for i,b in enumerate(bts):
+                b.config(bg="#89b4fa" if i==i_sel else "#45475a",
+                         fg="#1e1e2e" if i==i_sel else "#cdd6f4")
+        for i,nome in enumerate(opcoes):
+            b=tk.Button(fr,text=nome,command=lambda i=i:(_pinta(i),ao_escolher(i)),
+                        bg="#45475a",fg="#cdd6f4",font=("Segoe UI",9,"bold"),
+                        relief="flat",padx=10,pady=4,cursor="hand2")
+            b.pack(side="left",padx=2); bts.append(b)
+        _pinta(idx_atual)
+
+    # Tamanho base do cupom inteiro
+    g1=_grupo_im("Tamanho da letra — cupom inteiro",
+        "Vale do cabecalho ao rodape, em todas as impressoras (por impressora: aba Impressoras, campo Fonte). "
+        "Media deixa a letra 2x mais ALTA sem perder colunas (opcao segura). Grande/Extra tambem alargam: "
+        "sobra metade / um terco das colunas e nomes compridos quebram em mais linhas.", 0, 0, 2)
+    _botoes_escolha(g1, _FONTE_NOMES, _fonte_cfg(), lambda i:_salva_im("font_size", i))
+
+    # Destaques por secao
+    g2=_grupo_im("Destaques por secao",
+        "'Herda' segue o tamanho do cupom. No Nº do pedido, 'Auto' = Grande (como sempre foi).", 0, 1)
+    for _k,_rot,_her in [("loja","Nome da loja","Herda"),("pedido","N. do pedido","Auto (Grande)"),
+                         ("itens","Nome dos itens","Herda"),("total","TOTAL","Herda"),
+                         ("rodape","Rodape","Herda")]:
+        _frs=tk.Frame(g2,bg="#1e1e2e"); _frs.pack(anchor="w",padx=8,pady=1,fill="x")
+        tk.Label(_frs,text=_rot,bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9),width=14,anchor="w").pack(side="left")
+        _cbx=ttk.Combobox(_frs,values=[_her]+list(_FONTE_NOMES),width=13,state="readonly")
+        _vsec=_fonte_secao(_k)
+        _cbx.set(_FONTE_NOMES[_vsec] if _vsec is not None else _her)
+        def _muda_sec(e,k=_k,cb=None,her=""):
+            sel=cb.get(); fs=dict(cfg.get("fonte_secoes") or {})
+            if sel==her: fs.pop(k,None)
+            else: fs[k]=list(_FONTE_NOMES).index(sel)
+            _salva_im("fonte_secoes", fs or None)
+        _cbx.bind("<<ComboboxSelected>>",lambda e,k=_k,cb=_cbx,her=_her:_muda_sec(e,k,cb,her))
+        _cbx.pack(side="left",padx=4)
+    tk.Frame(g2,bg="#1e1e2e",height=4).pack()
+
+    # Estilo
+    g3=_grupo_im("Estilo","",1,1)
+    _neg_var=tk.BooleanVar(value=bool(cfg.get("negrito_cupom")))
+    _escu_var=tk.BooleanVar(value=bool(cfg.get("mais_escuro")))
+    for _var,_txt_cb,_chv in [(_neg_var,"Negrito no cupom inteiro (impressora que sai 'fraca')","negrito_cupom"),
+                              (_escu_var,"Impressao mais escura (passada dupla)","mais_escuro")]:
+        tk.Checkbutton(g3,text=_txt_cb,variable=_var,
+            command=lambda v=_var,c=_chv:_salva_im(c, True if v.get() else None),
+            bg="#1e1e2e",fg="#cdd6f4",selectcolor="#313244",activebackground="#1e1e2e",
+            activeforeground="#cdd6f4",font=("Segoe UI",9)).pack(anchor="w",padx=8,pady=1)
+    tk.Label(g3,text="Espaco entre linhas:",bg="#1e1e2e",fg="#cdd6f4",
+             font=("Segoe UI",9)).pack(anchor="w",padx=8,pady=(6,0))
+    _esp=cfg.get("espaco_linhas"); _esp_idx=_esp if _esp in (0,2) else 1
+    _botoes_escolha(g3,["Compacto","Normal","Espacado"],_esp_idx,
+                    lambda i:_salva_im("espaco_linhas", None if i==1 else i))
+
+    # Papel, corte e vias
+    g4=_grupo_im("Papel e corte",
+        "Largura: quando o servidor nao manda a largura no job, o cupom cai em 48 colunas; loja com bobina "
+        "de 58 mm ajusta aqui (ou por impressora, campo Colunas). Vias: so o cupom do cliente — comanda de "
+        "setor e cupom fiscal saem sempre em 1 via.", 0, 2, 2)
+    _fr_pap=tk.Frame(g4,bg="#1e1e2e"); _fr_pap.pack(anchor="w",fill="x")
+    _LARGURAS_PAPEL=[("Auto",None),("58mm",32),("76mm",42),("80mm",48)]
+    _pw_cfg=_colunas_validas(cfg.get("paper_width_cols"))
+    _pw_idx=next((i for i,(_n,_c) in enumerate(_LARGURAS_PAPEL) if _c==_pw_cfg),0)
+    tk.Label(_fr_pap,text="Largura da bobina",bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9),
+             width=18,anchor="w").pack(side="left",padx=(8,0))
+    _botoes_escolha(_fr_pap,[n for n,_ in _LARGURAS_PAPEL],_pw_idx,
+                    lambda i:_salva_im("paper_width_cols", _LARGURAS_PAPEL[i][1]))
+    _fr_cor=tk.Frame(g4,bg="#1e1e2e"); _fr_cor.pack(anchor="w",fill="x")
+    _CORTES=[("Corte total","total"),("Parcial (preso)","parcial"),("Sem corte","nao")]
+    _c_cfg=str(cfg.get("corte","total"))
+    _c_idx=next((i for i,(_n,_v) in enumerate(_CORTES) if _v==_c_cfg),0)
+    tk.Label(_fr_cor,text="Corte do papel",bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9),
+             width=18,anchor="w").pack(side="left",padx=(8,0))
+    _botoes_escolha(_fr_cor,[n for n,_ in _CORTES],_c_idx,
+                    lambda i:_salva_im("corte", None if _CORTES[i][1]=="total" else _CORTES[i][1]))
+    _fr_via=tk.Frame(g4,bg="#1e1e2e"); _fr_via.pack(anchor="w",fill="x")
+    try: _v_cfg=max(1,min(3,int(cfg.get("vias_cupom") or 1)))
+    except Exception: _v_cfg=1
+    tk.Label(_fr_via,text="Vias do cupom",bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9),
+             width=18,anchor="w").pack(side="left",padx=(8,0))
+    _botoes_escolha(_fr_via,["1 via","2 vias","3 vias"],_v_cfg-1,
+                    lambda i:_salva_im("vias_cupom", None if i==0 else i+1))
+    _fr_av=tk.Frame(g4,bg="#1e1e2e"); _fr_av.pack(anchor="w",fill="x",pady=(0,6))
+    tk.Label(_fr_av,text="Avanco antes do corte",bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9),
+             width=18,anchor="w").pack(side="left",padx=(8,0))
+    try: _av_cfg=max(0,min(8,int(cfg.get("avanco_linhas",5))))
+    except Exception: _av_cfg=5
+    _av_cbx=ttk.Combobox(_fr_av,values=[str(i) for i in range(9)],width=4,state="readonly")
+    _av_cbx.set(str(_av_cfg)); _av_cbx.pack(side="left",padx=8)
+    _av_cbx.bind("<<ComboboxSelected>>",
+                 lambda e:_salva_im("avanco_linhas", None if _av_cbx.get()=="5" else int(_av_cbx.get())))
+    tk.Label(_fr_av,text="linhas (5 = padrao)",bg="#1e1e2e",fg="#6c7086",font=("Segoe UI",8)).pack(side="left")
+
+    # Cupom de teste com os ajustes atuais
+    def imprimir_cupom_teste():
+        """Imprime um pedido de EXEMPLO com os ajustes acima, na impressora do caixa
+        (ou na 1a impressora mapeada). E o jeito de ver o resultado sem esperar pedido real."""
+        _impt=_res_imp_por_rede("receipt") \
+             or next((i for i in cfg.get("impressoras",[]) if i.get("nome_impressora") or i.get("endereco_ip")),None)
+        if not _impt:
+            messagebox.showwarning("Aviso","Nenhuma impressora mapeada!\nMapeie na aba Impressoras.",parent=w); return
+        _ct={"type":"order","numero":"123","order_type":"delivery","customer_name":"Maria Souza",
+             "company_name":(cfg.get("restaurant_name","") or "CUPOM DE TESTE").upper(),
+             "created_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+             "itens":[{"nome":"Pizza Calabresa","tamanho":"G","qtd":1,"preco_cents":4500,
+                       "adicionais":[{"nome":"Borda catupiry","preco_cents":800}],"notes":"sem cebola"},
+                      {"nome":"Coca-Cola Lata","qtd":2,"preco_cents":600}],
+             "subtotal_cents":5700,"delivery_fee_cents":700,"total_cents":6400,
+             "payment_method":"pix","footer_message":"Obrigado pela preferencia!"}
+        def _do_t():
+            try:
+                with _usar_codepage(_cp_da_impressora(_impt)), _usar_fonte(_fonte_da_impressora(_impt)):
+                    _tx=_fmt(_ct,"order","receipt",_impt)
+                    _r=_imprimir_com_roteamento(_impt,_tx)
+                _nm=_impt.get("nome_impressora") or _impt.get("endereco_ip","")
+                if _r.get("ok"):
+                    w.after(0,lambda:messagebox.showinfo("OK",f"Cupom de teste enviado:\n{_nm}",parent=w))
+                else:
+                    w.after(0,lambda:messagebox.showerror("Erro",_r.get("erro",""),parent=w))
+            except Exception as _e:
+                log.error(f"[CONFIG] Cupom de teste falhou: {_e}", exc_info=True)
+                w.after(0,lambda:messagebox.showerror("Erro",str(_e),parent=w))
+        threading.Thread(target=_do_t,daemon=True).start()
+
+    _fr_bt=tk.Frame(imroot,bg="#1e1e2e"); _fr_bt.grid(row=3,column=0,columnspan=2,sticky="w",padx=8,pady=(2,8))
+    tk.Button(_fr_bt,text="Imprimir cupom de teste",command=imprimir_cupom_teste,bg="#cba6f7",fg="#1e1e2e",
+              font=("Segoe UI",9,"bold"),relief="flat",padx=14,pady=6,cursor="hand2").pack(side="left",padx=4)
+    tk.Label(_fr_bt,text="Sai na impressora do caixa, com os ajustes desta aba e da impressora.",
+             bg="#1e1e2e",fg="#6c7086",font=("Segoe UI",8)).pack(side="left",padx=6)
 
     # BALANCAS
     f3=ttk.Frame(nb); nb.add(f3,text="Balancas")
