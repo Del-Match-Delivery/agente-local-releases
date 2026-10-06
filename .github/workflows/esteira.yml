@@ -10,6 +10,13 @@ name: Esteira
 #   2. CHAVE: todo PR de trabalho carrega a chave do work package do OpenProject
 #      (genpro.delmatch.com.br) no titulo ou na branch. Sem ela o sync nao move o
 #      ticket e o SLA nao conta. A validacao e de FORMATO, nao de existencia.
+#   3. MANIFESTO CONGELADO: o campo `version` do version.json tem que ser "5.77"
+#      em TODO PR. Agentes <= 5.77 leem so `version` e tem o auto-update quebrado
+#      (o .bat morre no proprio taskkill): qualquer valor diferente faz cada um
+#      deles se matar uma vez (loja sem imprimir) e travar na versao antiga.
+#      Versao nova vai em `latest_version`/`latest_url` (lidos pelos >= 5.78) e
+#      em `url` (lido pelo instalador). Em 30/09/2026 o manifesto da v5.80 passou
+#      com `version: 5.80` e descongelou a regra — este check impede a repeticao.
 #
 # Prefixos aceitos seguem o uso real dos repositorios (feat/fix sao os mais usados)
 # somados aos do ComprouTai (feature/bugfix/release).
@@ -78,3 +85,21 @@ jobs:
             exit 1
           fi
           echo "chave ok: ${TK:-$BK}"
+
+      # Valida o CONTEUDO do PR (merge virtual), nao a base: e o estado pos-merge
+      # que vai parar na branch.
+      - uses: actions/checkout@v4
+
+      - name: Manifesto congelado (version.json)
+        run: |
+          set -euo pipefail
+          if [ ! -f version.json ]; then
+            echo "sem version.json nesta branch; nada a validar"
+            exit 0
+          fi
+          v=$(jq -r '.version // ""' version.json)
+          if [ "$v" != "5.77" ]; then
+            echo "::error file=version.json::'version' esta '$v' e tem que continuar '5.77'. Agentes <=5.77 leem so esse campo e tem o updater quebrado: mudar o valor derruba o agente dessas lojas. Versao nova vai em latest_version/latest_url (e url para o instalador) — ver _REGRA_DE_PUBLICACAO no proprio arquivo."
+            exit 1
+          fi
+          echo "manifesto ok: version congelado em 5.77"
