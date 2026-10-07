@@ -1,0 +1,19 @@
+# Dependências do AgenteLocal (agente_local.py), tiradas dos `hiddenimports` do
+# AgenteLocal.spec — que é o que o PyInstaller precisa enxergar para o executável
+# funcionar na máquina da loja.
+#
+# Sem este arquivo o build só existia na máquina de quem publicava, e ninguém
+# conseguia reproduzir um executável antigo.
+#
+# As versões ficam abertas nesta primeira volta, de propósito: congelar agora
+# fixaria o que está na máquina de alguém, não o que foi testado. Depois do
+# primeiro build verde no CI, rodar `pip freeze` e fixar aqui — aí o pin passa a
+# valer alguma coisa.
+pyinstaller
+pywin32          # win32api, win32print
+pyserial         # serial.tools.list_ports
+websockets
+pynput
+pyusb            # usb
+pystray
+pillow           # PIL, PIL.Image, PIL.ImageDraw
