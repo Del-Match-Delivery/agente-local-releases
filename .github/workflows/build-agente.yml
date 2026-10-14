@@ -105,6 +105,12 @@ jobs:
           retention-days: 30
 
       - name: Anexar à release da tag
+        # NUNCA sobrescreve. O publicar_release.ps1 sobe o exe TESTADO no rascunho
+        # e só então publica — e é a publicação que cria a tag e dispara este
+        # workflow. Com --clobber, o binário testado (cujo hash o script já
+        # conferiu) seria trocado minutos depois por um que ninguém testou, na
+        # mesma URL que agentes e instalador baixam. Se a release já tem exe,
+        # aqui só se compara o hash e se informa.
         if: startsWith(github.ref, 'refs/tags/v') || inputs.anexar
         shell: bash
         env:
@@ -116,5 +122,16 @@ jobs:
             echo "::warning::não existe release $TAG — o binário ficou como artefato do run"
             exit 0
           fi
-          gh release upload "$TAG" dist/AgenteLocal.exe dist/AgenteLocal.exe.sha256 --clobber
+          if gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx 'AgenteLocal.exe'; then
+            gh release download "$TAG" -p AgenteLocal.exe -O publicado.exe
+            publicado=$(sha256sum publicado.exe | awk '{print toupper($1)}')
+            compilado=$(cat dist/AgenteLocal.exe.sha256)
+            if [ "$publicado" = "$compilado" ]; then
+              echo "a release $TAG já tem este mesmo binário (sha256 $compilado)"
+            else
+              echo "::notice::a release $TAG já tem um AgenteLocal.exe (sha256 $publicado), diferente do compilado aqui ($compilado). O publicado NÃO foi tocado; o do CI ficou como artefato do run."
+            fi
+            exit 0
+          fi
+          gh release upload "$TAG" dist/AgenteLocal.exe dist/AgenteLocal.exe.sha256
           echo "anexado à release $TAG"
