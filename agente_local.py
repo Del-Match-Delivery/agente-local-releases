@@ -1182,7 +1182,7 @@ def _largura_efetiva(imp, content, servidor):
     return W
 
 TL={"counter":"BALCAO","dine_in":"MESA","takeaway":"RETIRADA","delivery":"ENTREGA","pickup":"RETIRADA","table":"MESA","balcao":"BALCAO","mesa":"MESA","retirada":"RETIRADA","entrega":"ENTREGA"}
-PL={"cash":"Dinheiro","credit":"Cartao Credito","debit":"Cartao Debito","pix":"PIX","card":"Cartao","money":"Dinheiro","creditcard":"Cartao Credito","debitcard":"Cartao Debito"}
+PL={"cash":"Dinheiro","credit":"Cartao Credito","debit":"Cartao Debito","pix":"PIX","card":"Cartao","online_card":"Cartao Online","online_pix":"PIX Online","money":"Dinheiro","creditcard":"Cartao Credito","debitcard":"Cartao Debito"}
 
 def _pedido_do_content(content):
     """Retorna o objeto 'pedido' quando o servidor manda content aninhado.
