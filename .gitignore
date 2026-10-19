@@ -27,3 +27,8 @@ setup.iss
 
 # Documentos
 *.docx
+
+.venv/
+venv/
+__pycache__/
+*.pyc
