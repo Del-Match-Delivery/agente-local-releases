@@ -4,6 +4,12 @@
 #
 # Publica em agente.delmatch.com.br: CloudFront (TLS) -> Traefik :80 -> este container.
 # So serve arquivos estaticos gerados pelo deploy/publicar.sh; nada e compilado aqui.
+
+# Nome de projeto EXPLICITO. Sem ele o Compose usa o nome da pasta, `deploy`, o mesmo
+# do desafioagenda: os dois viravam um projeto so, cada deploy acusava o outro como
+# orfao e um `--remove-orphans` em qualquer um derrubaria o outro.
+name: agente-local-espelho
+
 services:
   espelho:
     image: nginxinc/nginx-unprivileged:1.27-alpine

@@ -22,6 +22,14 @@ chmod 755 "$PUBLICO" "$PUBLICO/releases"
 
 python3 deploy/espelhar.py "$PUBLICO" "$DOMINIO"
 
+# O primeiro deploy (26/10/2026) subiu o container no projeto `deploy`, antes do
+# `name:` no compose. Com o mesmo container_name, o `up` no projeto novo daria
+# conflito; o container antigo e removido aqui (ninguem depende dele ainda).
+proj=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' agente-local-espelho 2>/dev/null || true)
+if [ -n "$proj" ] && [ "$proj" != "agente-local-espelho" ]; then
+  echo "removendo agente-local-espelho do projeto compose '$proj'"
+  docker rm -f agente-local-espelho
+fi
 docker compose -f "$COMPOSE" up -d
 sleep 3
 docker compose -f "$COMPOSE" ps
