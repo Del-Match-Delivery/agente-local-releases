@@ -2860,7 +2860,33 @@ def poll():
     _atualizar_icone()
 
 CURRENT_VERSION = "5.82"
-VERSION_URL = "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json"
+# AGLR-5: o manifesto vem do dominio proprio (espelho do version.json da main na EC2
+# PROJETOS, com os exe servidos de la). O caminho antigo do GitHub fica como RESERVA: ele
+# so funciona pelo redirect que o GitHub mantem desde a transferencia do repositorio para a
+# organizacao, e se o espelho cair a loja nao pode perder o auto-update.
+VERSION_URLS = (
+    "https://agente.delmatch.com.br/version.json",
+    "https://raw.githubusercontent.com/delmatch-user/agente-local-releases/main/version.json",
+)
+VERSION_URL = VERSION_URLS[0]
+
+def _ler_manifesto():
+    """version.json publicado: tenta cada endereco de VERSION_URLS em ordem e devolve o
+    primeiro que responder JSON. Levanta a ultima falha se nenhum responder."""
+    erro = None
+    for i, url in enumerate(VERSION_URLS):
+        try:
+            req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+            with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx()) as r:
+                info = json.loads(r.read())
+            if not isinstance(info, dict):
+                raise ValueError("manifesto nao e um objeto JSON")
+            if i:
+                log.info(f"[UPDATE] Manifesto lido da reserva {url} (principal falhou: {erro})")
+            return info
+        except Exception as e:
+            erro = e
+    raise erro
 
 _update_em_andamento = False  # evita multiplos downloads simultaneos
 
@@ -3085,9 +3111,7 @@ async def checar_atualizacao():
         except Exception:
             pass
     try:
-        req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
-        with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx()) as r:
-            info = json.loads(r.read())
+        info = _ler_manifesto()   # AGLR-5: dominio proprio, GitHub como reserva
         nova, url_nova = _alvo_update(info)   # v5.78: latest_* antes de version/url
         if not nova or not url_nova or nova == CURRENT_VERSION:
             return
@@ -3443,9 +3467,7 @@ def abrir_dashboard():
         btn_upd.config(text="Verificando...", state="disabled", bg="#89b4fa")
         def _run():
             try:
-                req = urllib.request.Request(VERSION_URL, headers={"Cache-Control": "no-cache"})
-                with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx()) as r:
-                    info = json.loads(r.read())
+                info = _ler_manifesto()   # AGLR-5: dominio proprio, GitHub como reserva
                 nova, url_nova = _alvo_update(info)   # v5.78: latest_* antes de version/url
                 if not nova or not url_nova:
                     w.after(0, lambda: (btn_upd.config(text="Atualizar Sistema", state="normal", bg="#a6e3a1"),
