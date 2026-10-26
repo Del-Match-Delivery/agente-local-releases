@@ -55,7 +55,7 @@ function Invoke-Gh {
 }
 
 # ---- chave: MAIUSCULAS e digitos 0-9, com um prefixo que o check "validate" aceite ----
-# (o grep do check diferencia maiuscula; 'agnt-039' vira 'AGNT-039'. Os prefixos aceitos sao lidos do
+# (o grep do check diferencia maiuscula; 'aglr-12' vira 'AGLR-12'. Os prefixos aceitos sao lidos do
 #  proprio .github/workflows/esteira.yml da branch de destino: se o time incluir um prefixo novo,
 #  este roteiro passa a aceita-lo sem editar nada.)
 $Chave = $Chave.Trim().ToUpperInvariant()
