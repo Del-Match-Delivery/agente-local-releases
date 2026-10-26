@@ -65,7 +65,9 @@ jobs:
         env:
           HEAD: ${{ github.head_ref }}
           TITLE: ${{ github.event.pull_request.title }}
-          CHAVES: "AGLR|COMP|AGNT"
+          # AGLR-4: so prefixos de projeto que existem no OpenProject. Chave sem
+          # projeto passa aqui e o sync descarta, sem mover ticket nenhum.
+          CHAVES: "AGLR|COMP"
         run: |
           set -euo pipefail
           case "$HEAD" in
