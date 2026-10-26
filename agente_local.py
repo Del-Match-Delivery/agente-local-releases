@@ -2859,7 +2859,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.82"
+CURRENT_VERSION = "5.83"
 # AGLR-5: o manifesto vem do dominio proprio (espelho do version.json da main na EC2
 # PROJETOS, com os exe servidos de la). O caminho antigo do GitHub fica como RESERVA: ele
 # so funciona pelo redirect que o GitHub mantem desde a transferencia do repositorio para a
