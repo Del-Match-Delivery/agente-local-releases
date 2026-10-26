@@ -1,0 +1,113 @@
+name: Espelho das releases (produção)
+
+# AGLR-5. Publica em agente.delmatch.com.br o mesmo manifesto da main e os .exe
+# que ele aponta, para o agente deixar de depender do caminho antigo
+# raw.githubusercontent.com/delmatch-user/..., que só funciona pelo redirect da
+# transferência do repositório.
+#
+# Alvo: EC2 Delmatch_PROJETOS, clone em /home/ec2-user/agente-local-releases,
+# arquivos servidos em /home/ec2-user/agente-local-publico, container atrás do
+# Traefik na 127.0.0.1:3014.
+#
+# DECISÕES QUE NÃO SÃO ÓBVIAS NO CÓDIGO
+#
+# 1. GATILHO É O PUSH NA MAIN, não a release. O que decide a versão das lojas é
+#    o merge do version.json na main (PR do manifesto-release.yml, revisado por
+#    gente). O espelho acompanha esse merge; release publicada sem manifesto não
+#    muda nada. E a role OIDC só confia em refs/heads/main: um evento de release
+#    roda na ref da tag e não conseguiria assumir a role.
+#
+# 2. SEM SEGREDO NO REPOSITÓRIO. A role GitHubActions-AgenteLocalReleases-Prod
+#    só pode ssm:SendCommand nesta instância com o documento AWS-RunShellScript.
+#
+# 3. SSM, não SSH (porta 22 fechada), e `sudo -u ec2-user`: o SSM roda como
+#    root, e o clone e o docker são do ec2-user.
+#
+# 4. O commit vai FIXO (github.sha), não origin/main: se outro merge entrar no
+#    meio, este run publica exatamente o que o disparou.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - version.json
+      - deploy/**
+      - .github/workflows/deploy-prod.yml
+  workflow_dispatch:
+
+concurrency:
+  group: espelho-releases
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write      # obrigatório para o runner emitir o token OIDC
+
+env:
+  AWS_REGION: us-east-1
+  INSTANCE_ID: i-0eae148eb5bfb2d00
+  ROLE_ARN: arn:aws:iam::830528708244:role/GitHubActions-AgenteLocalReleases-Prod
+
+jobs:
+  publicar:
+    name: Publicar o espelho
+    runs-on: ubuntu-latest
+    # A role só aceita a main; dispatch em outra branch falharia no OIDC.
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Autenticar na AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: A instância está de pé?
+        run: |
+          set -euo pipefail
+          estado=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[].Instances[].State.Name' --output text)
+          echo "instância: $estado"
+          [ "$estado" = "running" ] || {
+            echo "::error::A instância está '$estado'. Ligue-a e rode este workflow de novo."
+            exit 1; }
+
+      - name: Enviar a publicação via SSM
+        id: envio
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Repositório público: o clone e o fetch não precisam de credencial.
+          # Na primeira vez o clone é criado aqui; depois só fetch + reset.
+          COMANDO="sudo -u ec2-user bash -lc 'set -eu; D=/home/ec2-user/agente-local-releases; [ -d \$D/.git ] || git clone -q https://github.com/Del-Match-Delivery/agente-local-releases.git \$D; cd \$D; git fetch -q origin main; git reset -q --hard ${SHA}; bash deploy/publicar.sh'"
+          jq -n --arg c "$COMANDO" '{commands: [$c]}' > /tmp/params.json
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "espelho agente-local ${SHA:0:7} (GitHub Actions)" \
+            --parameters file:///tmp/params.json \
+            --query Command.CommandId --output text)
+          echo "cmd_id=$CMD_ID" >> "$GITHUB_OUTPUT"
+          echo "comando enviado: $CMD_ID"
+
+      - name: Aguardar e mostrar o resultado
+        env:
+          CMD_ID: ${{ steps.envio.outputs.cmd_id }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            status=$(aws ssm get-command-invocation --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in
+              InProgress|Pending|Delayed) sleep 5 ;;
+              *) break ;;
+            esac
+          done
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardOutputContent --output text
+          erro=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardErrorContent --output text)
+          [ -z "$erro" ] || { echo "--- stderr ---"; echo "$erro"; }
+          echo "status final: $status"
+          # Sem esta linha, falha no servidor deixaria o run verde.
+          [ "$status" = "Success" ] || { echo "::error::Publicação falhou no servidor ($status)."; exit 1; }
