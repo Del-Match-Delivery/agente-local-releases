@@ -895,16 +895,30 @@ def _bytes_big_on():
     if v is None: v = max(2, _fonte_atual())
     return b"\x1b\x61\x01\x1b\x45\x01" + _gs_fonte(v)
 
-_ALIASES_CODIGO_ITEM = ("barcode","codigo","codigo_produto","codigo_barras","cod_barras","sku","ean","ean13")
+# v5.84: "sku" saiu desta lista — o SKU tem linha propria (_linha_sku_item). Ate a v5.83 o agente
+# imprimia so o PRIMEIRO codigo que achava (barcode antes de sku): loja com codigo de barras E SKU
+# cadastrados nunca via o SKU no cupom.
+_ALIASES_CODIGO_ITEM = ("barcode","codigo","codigo_produto","codigo_barras","cod_barras","ean","ean13")
 
 def _codigo_do_item(item):
-    """Retorna o codigo do produto (EAN/SKU) cadastrado no item, se houver.
+    """Retorna o codigo de barras do produto (EAN) cadastrado no item, se houver.
     Aceita varios aliases pois o backend ainda nao fixou um unico nome pra esta chave."""
     if not isinstance(item, dict): return ""
     for k in _ALIASES_CODIGO_ITEM:
         v = item.get(k)
         if v: return str(v).strip()
     return ""
+
+def _sku_do_item(item):
+    """SKU do produto (products.sku) cadastrado no item, se houver (v5.84). O servidor manda a
+    chave 'sku' ao lado de 'barcode' em todo caminho que monta itens de job (funcoes do banco,
+    print-job-create, agent-get-order) desde 23/10/2026. Vazio quando nao ha SKU ou quando ele e
+    o proprio codigo que ja sai na linha 'Cod:' — o mesmo numero nao sai duas vezes."""
+    if not isinstance(item, dict): return ""
+    v = item.get("sku")
+    sku = str(v).strip() if v else ""
+    if not sku or sku == _codigo_do_item(item): return ""
+    return sku
 
 def _valida_ean13(codigo):
     """True se codigo tem exatamente 13 digitos e o digito verificador (padrao EAN-13) bate."""
@@ -955,6 +969,13 @@ def _linha_codigo_item(item, imprime_barcode=False):
     if not codigo: return ""
     if imprime_barcode and _valida_ean13(codigo): return f"[[EAN13:{codigo}]]"
     return f"  Cod: {codigo}"
+
+def _linha_sku_item(item):
+    """Linha '  SKU: X' logo abaixo da linha do codigo de barras (v5.84), em todo cupom que tem a
+    linha 'Cod:'. Sempre texto: SKU e codigo interno da loja, nao EAN, e nao vira barras.
+    Retorna '' se o item nao tem SKU — cupom identico ao da v5.83."""
+    sku = _sku_do_item(item)
+    return f"  SKU: {sku}" if sku else ""
 
 def _flag_print_barcode(content):
     """Decide se o cupom deste job sai com barras EAN-13 (v5.82).
@@ -2105,10 +2126,11 @@ def _fmt(content, jt, pt, imp=None):
             _its_log = _itens_do_content(content)
             _ncod = sum(1 for _i in _its_log if _codigo_do_item(_i))
             _nean = sum(1 for _i in _its_log if _valida_ean13(_codigo_do_item(_i)))
+            _nsku = sum(1 for _i in _its_log if _sku_do_item(_i))
             _orig = ("chave print_barcode do job" if "print_barcode" in content
                      else ("ajuste da loja (poll)" if _print_barcode_servidor is not None else "nenhum: job sem a chave e servidor sem ajuste"))
             log.info(f"[CUPOM] codigo de barras: {'LIGADO' if _barcode_on else 'desligado'} | origem: {_orig} | "
-                     f"itens com codigo: {_ncod}/{len(_its_log)} (EAN-13 validos: {_nean})")
+                     f"itens com codigo: {_ncod}/{len(_its_log)} (EAN-13 validos: {_nean}) | itens com SKU: {_nsku}")
         except Exception:
             pass
 
@@ -2221,6 +2243,8 @@ def _fmt(content, jt, pt, imp=None):
                 ll += _linha_pai(item)
                 _cod_ln=_linha_codigo_item(item, _barcode_on)
                 if _cod_ln: ll.append(_cod_ln)
+                _sku_ln=_linha_sku_item(item)
+                if _sku_ln: ll.append(_sku_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                     pc=a.get("preco_cents",0)
@@ -2293,6 +2317,8 @@ def _fmt(content, jt, pt, imp=None):
                     ll += _linha_pai(item)
                     _cod_ln=_linha_codigo_item(item, _barcode_on)
                     if _cod_ln: ll.append(_cod_ln)
+                    _sku_ln=_linha_sku_item(item)
+                    if _sku_ln: ll.append(_sku_ln)
                     for a in _adicionais_do_item(item):
                         if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                         ll.append(f"  + {a.get('nome','')}{_rota_sufixo(a)}")
@@ -2346,6 +2372,8 @@ def _fmt(content, jt, pt, imp=None):
                     for linha in _linha_pai(item): parts.append(enc(linha))
                     _cod_ln=_linha_codigo_item(item, _barcode_on)
                     if _cod_ln: parts.append(_substituir_marcadores_escpos(_cod_ln + "\n"))
+                    _sku_ln=_linha_sku_item(item)
+                    if _sku_ln: parts.append(encq(_sku_ln))
                     for a in _adicionais_do_item(item):
                         if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                         parts.append(encq(f"  + {a.get('nome','')}{_rota_sufixo(a)}"))
@@ -2401,6 +2429,8 @@ def _fmt(content, jt, pt, imp=None):
                 ll += _linha_pai(item)
                 _cod_ln=_linha_codigo_item(item, _barcode_on)
                 if _cod_ln: ll.append(_cod_ln)
+                _sku_ln=_linha_sku_item(item)
+                if _sku_ln: ll.append(_sku_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                     pc=a.get("preco_cents",0)
@@ -2456,6 +2486,8 @@ def _fmt(content, jt, pt, imp=None):
                 ll += _linha_pai(item)
                 _cod_ln=_linha_codigo_item(item, _barcode_on)
                 if _cod_ln: ll.append(_cod_ln)
+                _sku_ln=_linha_sku_item(item)
+                if _sku_ln: ll.append(_sku_ln)
                 for a in _adicionais_do_item(item):
                     if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                     pc=a.get("preco_cents",0)
@@ -2859,7 +2891,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.83"
+CURRENT_VERSION = "5.84"
 # AGLR-5: o manifesto vem do dominio proprio (espelho do version.json da main na EC2
 # PROJETOS, com os exe servidos de la). O caminho antigo do GitHub fica como RESERVA: ele
 # so funciona pelo redirect que o GitHub mantem desde a transferencia do repositorio para a
