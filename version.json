@@ -1,8 +1,8 @@
 {
   "version": "5.77",
-  "url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.83/AgenteLocal.exe",
-  "latest_version": "5.83",
-  "latest_url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.83/AgenteLocal.exe",
-  "notes": "v5.83: (1) AGLR-5: auto-update e consulta de versao passam a ler prioritariamente de agente.delmatch.com.br/version.json, mantendo o GitHub como reserva transparente em caso de falha de rede/DNS. (2) AGLR-8: correcao do mapeamento de formas de pagamento online no cupom impresso ('online_card' -> 'Cartao Online' e 'online_pix' -> 'PIX Online'). Sem alteracoes no protocolo de auto-update legado. Recomendado atualizar.",
+  "url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.84/AgenteLocal.exe",
+  "latest_version": "5.84",
+  "latest_url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.84/AgenteLocal.exe",
+  "notes": "v5.84: SKU DO PRODUTO NO CUPOM. Produto com SKU cadastrado sai com a linha '  SKU: <sku>' logo abaixo da linha do codigo de barras ('  Cod: <EAN>'), em todo cupom que ja mostrava o codigo (caixa, cozinha, retirada, entrega). Ate a v5.83 o agente imprimia so o PRIMEIRO codigo que achava (barcode antes de sku): loja com codigo de barras E SKU nunca via o SKU. O servidor ja manda o campo 'sku' em todos os caminhos desde 23/10/2026; so faltava o agente imprimir. Produto so com SKU passa a sair 'SKU: <sku>' em vez de 'Cod: <sku>'. SKU igual ao codigo de barras nao repete. Produto sem SKU: cupom identico ao da v5.83. Inclui tudo da v5.83 (manifesto no dominio proprio; Cartao/PIX Online no cupom).",
   "_REGRA_DE_PUBLICACAO": "'version' fica CONGELADO em 5.77 para sempre: agentes <=5.77 tem o auto-update QUEBRADO (o bat morre no proprio taskkill) e comparam SO 'version' - se mudar, cada um deles se mata uma vez (loja sem agente) e trava na versao antiga. 'url' PODE (e deve) apontar para o exe mais novo: esses agentes nunca baixam (version igual a deles), mas o InstalarAgente.exe e os bats antigos leem 'url' e assim instalam a versao atual. A cada versao nova atualize latest_version + latest_url + url, NUNCA version. Clientes em <=5.77 migram uma unica vez pelo ATUALIZAR_E_ABRIR_AGENTE.bat. Downgrade automatico so com \"allow_downgrade\": true."
 }

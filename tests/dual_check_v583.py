@@ -11,7 +11,7 @@ assert ag.PL.get("credit") == "Cartao Credito"
 print("-> AGLR-8 OK: Formas de pagamento mapeadas com exatidao!")
 
 print("\n=== [DUAL CHECK 2/3] Teste de Comparacao de Versoes ===")
-assert ag.CURRENT_VERSION == "5.83", "CURRENT_VERSION incorreta"
+assert ag._ver_tuple(ag.CURRENT_VERSION) >= (5, 83), "CURRENT_VERSION incorreta"   # v5.84+: a checagem da 5.83 continua valendo
 assert ag._ver_tuple("5.83") > ag._ver_tuple("5.82")
 assert ag._ver_tuple("5.83") == (5, 83)
 assert ag._ver_tuple("5.82") < ag._ver_tuple(ag.CURRENT_VERSION)
