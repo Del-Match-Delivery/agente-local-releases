@@ -5,6 +5,7 @@ Rodar sempre com o Python do build (`venv_build`), a partir da pasta do projeto:
 ```
 venv_build\Scripts\python.exe tests\test_eleicao.py     # eleicao de instancia unica + alvo do update (funcoes puras)
 venv_build\Scripts\python.exe tests\test_agendado.py    # destaque AGENDADO, largura do papel, EAN-13, bytes ESC/POS
+venv_build\Scripts\python.exe tests\test_sku_no_cupom.py   # SKU no cupom (v5.84), papel interpretado; AGENTE_ANTERIOR=<v5.83> compara
 venv_build\Scripts\python.exe tests\test_hora.py        # Data/Hora em horario de Brasilia
 venv_build\Scripts\python.exe tests\test_codepage.py    # acentos por impressora, modo ascii, pagina de teste, proc_job com 2 impressoras
 venv_build\Scripts\python.exe tests\test_ui_config.py   # tela Configuracoes REAL (abre por instantes): Acentos, Aplicar, Testar acentos, Conectar
