@@ -1756,7 +1756,7 @@ def _bloco_endereco(content, w, titulo="ENTREGA:"):
 # setor. Lista EXPLICITA de proposito: classificar por exclusao ("se nao e order nem receipt,
 # entao e setor") fazia o cupom fiscal sair como ticket de cozinha, sem o bloco fiscal.
 # AO CRIAR UM job_type NOVO QUE SEJA CUPOM DE CLIENTE, ELE PRECISA ENTRAR AQUI.
-TIPOS_CUPOM_CLIENTE = {"order", "receipt", "fiscal", "danfce", "pickup", "delivery"}
+TIPOS_CUPOM_CLIENTE = {"order", "receipt", "fiscal", "danfce", "pickup", "delivery", "pre_closing_simple", "pre_closing_full"}
 TIPOS_CUPOM_FISCAL  = {"fiscal", "danfce"}
 
 # Ajuste SINIEF 32/24, em vigor desde 01/02/2025: todo impresso entregue ao consumidor que
@@ -2076,7 +2076,7 @@ def _fmt(content, jt, pt, imp=None):
     # Desembrulha o pedido aninhado qualquer que seja o nome da chave: 'pedido' (agent-jobs) ou
     # 'order' (print-agent-poll). Sem isto o shape do print-agent-poll sairia com os itens mas
     # sem numero do pedido, cliente e totais — todos eles estao um nivel abaixo.
-    for _chave_ninho in ("pedido", "order"):
+    for _chave_ninho in ("pedido", "order", "tab"):
         _ninho = content.get(_chave_ninho)
         if isinstance(_ninho, dict):
             _merged = dict(_ninho)
@@ -2163,7 +2163,7 @@ def _fmt(content, jt, pt, imp=None):
     tipo=content.get("type",jt); ll=[]
     # Normaliza tipos de salao/mesa para o layout receipt
     if tipo not in ("order","receipt","kitchen","bar","pickup","delivery","command","test_page",
-                    "fiscal","danfce"):
+                    "fiscal","danfce","pre_closing_simple","pre_closing_full"):
         tipo = "receipt"
 
     # CUPOM FISCAL (NFC-e): documento DIFERENTE do cupom do pedido. Sai por modulo proprio,
@@ -2174,7 +2174,7 @@ def _fmt(content, jt, pt, imp=None):
     if isinstance(_fiscal, dict) and _fiscal:
         return _cupom_fiscal_bytes(content, _fiscal, w)
 
-    if tipo in ("order","receipt","fiscal","danfce"):
+    if tipo in ("order","receipt","fiscal","danfce","pre_closing_simple","pre_closing_full"):
         # Ajuste SINIEF 32/24: cupom do pedido SEM NFC-e autorizada precisa avisar que nao e
         # documento fiscal. Quando ha bloco fiscal o codigo nem chega aqui (retornou acima) —
         # e la o aviso NAO aparece, porque ali o documento e fiscal.
@@ -2232,11 +2232,31 @@ def _fmt(content, jt, pt, imp=None):
         ll.append(S)
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         ent=content.get("delivery_fee_cents",0); tot=content.get("total_cents",0)
+        tx_serv=content.get("service_fee_cents",0)
+
+        # Fallback de calculo de itens se subtotal vier zerado/ausente
+        if not sub:
+            _its_calc = _itens_do_content(content)
+            if _its_calc:
+                _s_itens = 0
+                for _it in _its_calc:
+                    _qi = _qtd_do_item(_it)
+                    _pi = _preco_do_item(_it)
+                    _adds_total = sum(int(a.get("preco_cents") or a.get("priceCents") or a.get("unit_price_cents") or 0) for a in _adicionais_do_item(_it))
+                    _s_itens += (_pi + _adds_total) * _qi
+                if _s_itens > 0:
+                    sub = _s_itens
+
+        # Fallback de TOTAL se vier zerado/ausente
+        if not tot:
+            tot = max(0, int(sub or 0) - int(desc or 0) + int(ent or 0) + int(tx_serv or 0))
+
         # v5.81: _par empilha o valor quando nao cabe ao lado do rotulo (fonte Extra em 58 mm
         # deixa 10 colunas; antes o f-string gerava linha maior que o papel e quebrava no meio).
         if sub: ll += _par("Subtotal:", _R(sub), w)
         if desc and int(desc)>0: ll += _par("Desconto:", f"-{_R(desc)}", w)
         if ent and int(ent)>0: ll += _par("Taxa entrega:", _R(ent), w)
+        if tx_serv and int(tx_serv)>0: ll += _par("Taxa servico:", _R(tx_serv), w)
         ll += _lin_valor("TOTAL:", _R(tot), "total")
         pg=content.get("payment_method","")
         if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
