@@ -1763,6 +1763,107 @@ def _bloco_endereco(content, w, titulo="ENTREGA:"):
         return []
     return [S, titulo.center(w)] + linhas
 
+# ---------------------------------------------------------------------------
+# Bloco de Pedido Atualizado / Comanda Editada (COMP-439)
+# ---------------------------------------------------------------------------
+def _dados_edicao(content):
+    """Extrai (dict_edicao, versao) de content.edicao/edition/edit e edit_version.
+    Retorna None se o pedido nao for editado (preserva comportamento identico byte-a-byte)."""
+    if not isinstance(content, dict):
+        return None
+    ed = content.get("edicao") or content.get("edition") or content.get("edit")
+    ev = content.get("edit_version") or content.get("versao_edicao") or content.get("version")
+    if ed is None and ev is None:
+        return None
+    return (ed if isinstance(ed, dict) else {}), ev
+
+def _extrair_lista_edicao(ed, *chaves):
+    """Busca a primeira lista encontrada dentre as chaves especificadas em ed."""
+    if not isinstance(ed, dict):
+        return []
+    for k in chaves:
+        v = ed.get(k)
+        if isinstance(v, list):
+            return v
+    return []
+
+def _norm_item_edicao(it):
+    """Normaliza item de edicao (string ou dict) para {nome, quantidade, detalhes}."""
+    if isinstance(it, str):
+        return {"nome": it.strip(), "quantidade": 1, "detalhes": ""}
+    if not isinstance(it, dict):
+        return {"nome": str(it), "quantidade": 1, "detalhes": ""}
+    nome = str(it.get("nome") or it.get("name") or it.get("title") or it.get("item") or "").strip()
+    qtd = it.get("quantidade")
+    if qtd is None:
+        qtd = it.get("quantity")
+    if qtd is None:
+        qtd = it.get("qtd", 1)
+    det = str(it.get("detalhes") or it.get("details") or it.get("observacao") or it.get("obs") or it.get("notes") or "").strip()
+    adds = it.get("adicionais") or it.get("addons") or []
+    if isinstance(adds, list) and adds:
+        nomes_adds = [str(a.get("nome") or a.get("name") if isinstance(a, dict) else a).strip() for a in adds]
+        txt_adds = ", ".join(filter(None, nomes_adds))
+        if txt_adds:
+            det = f"{det} (+ {txt_adds})".strip() if det else f"+ {txt_adds}"
+    return {"nome": nome, "quantidade": qtd, "detalhes": det}
+
+def _linhas_destaque_edicao(content, w, w_fis):
+    """Gera o cabecalho de destaque para pedidos editados:
+    'PEDIDO ATUALIZADO' em negrito/altura dupla centralizado, ou caixa alta alinhada se sem suporte."""
+    res = _dados_edicao(content)
+    if not res:
+        return []
+    texto = "PEDIDO ATUALIZADO"
+    # Centraliza e aplica negrito/altura dupla (funciona em texto puro via _substituir_marcadores_escpos)
+    return [
+        "=" * w,
+        f"[[ALTO_ON]]{texto.center(int(w_fis))}[[ALTO_OFF]]",
+        "=" * w,
+    ]
+
+def _linhas_bloco_edicao(content, w):
+    """Monta o bloco [EDITADO] com itens adicionados, alterados e removidos, alem da versao."""
+    res = _dados_edicao(content)
+    if not res:
+        return []
+    ed, ev = res
+    adds = _extrair_lista_edicao(ed, "adicionados", "adicionado", "added", "novos", "novo")
+    alts = _extrair_lista_edicao(ed, "alterados", "alterado", "changed", "modificados", "modificado")
+    rems = _extrair_lista_edicao(ed, "removidos", "removido", "removed", "cancelados", "cancelado")
+
+    # Se nao houver nenhuma lista e nenhuma versao especificada, nao imprime bloco vazio
+    if not adds and not alts and not rems and ev is None:
+        return []
+
+    S = "-" * w
+    linhas = [S, "[EDITADO]".center(w)]
+    if ev is not None and str(ev).strip():
+        linhas.append(f"Versao {ev}".center(w))
+    linhas.append(S)
+
+    def _render_grupo(titulo_grupo, itens_grupo, prefixo_item):
+        if not itens_grupo:
+            return
+        linhas.append(f"** {titulo_grupo} **")
+        for raw in itens_grupo:
+            d = _norm_item_edicao(raw)
+            nome = d["nome"] or "(sem nome)"
+            q = d["quantidade"]
+            linha_txt = f"{prefixo_item} [ {q}x ] {nome}" if q not in (None, "", 1) else f"{prefixo_item} {nome}"
+            for sub in _wrap_linhas(linha_txt, w):
+                linhas.append(sub)
+            if d["detalhes"]:
+                for sub in _wrap_linhas(f"    >> {d['detalhes']}", w):
+                    linhas.append(sub)
+
+    _render_grupo("ADICIONADO", adds, "[+]")
+    _render_grupo("ALTERADO", alts, "[*]")
+    _render_grupo("REMOVIDO", rems, "[-]")
+
+    linhas.append(S)
+    return linhas
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # NFC-e — DANFE (Documento Auxiliar da NFC-e)
 #
@@ -2197,6 +2298,10 @@ def _fmt(content, jt, pt, imp=None):
         return _cupom_fiscal_bytes(content, _fiscal, w)
 
     if tipo in ("order","receipt","fiscal","danfce","pre_closing_simple","pre_closing_full"):
+        # Destaque de pedido atualizado / edicao no topo (COMP-439)
+        _dst_edicao = _linhas_destaque_edicao(content, w, w_fis)
+        if _dst_edicao:
+            ll += _dst_edicao
         # Ajuste SINIEF 32/24: cupom do pedido SEM NFC-e autorizada precisa avisar que nao e
         # documento fiscal. Quando ha bloco fiscal o codigo nem chega aqui (retornou acima) —
         # e la o aviso NAO aparece, porque ali o documento e fiscal.
@@ -2233,7 +2338,12 @@ def _fmt(content, jt, pt, imp=None):
         # (contrato do print_jobs.content; espelha o agente Tauri). Ausente => cupom igual.
         _ag=_linhas_agendado(content, w_fis)
         if _ag: ll.append(S); ll += _ag
-        ll.append(S)
+        # Bloco discriminando itens alterados/adicionados/removidos e versao (COMP-439)
+        _bl_edicao = _linhas_bloco_edicao(content, w)
+        if _bl_edicao:
+            ll += _bl_edicao
+        else:
+            ll.append(S)
         DP="."*w
         for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
             ll += _cab_categoria(_cat, w)
@@ -2297,6 +2407,10 @@ def _fmt(content, jt, pt, imp=None):
         titulo = "COZINHA" if tipo=="kitchen" else "BAR"
         # Cabecalho sempre em fonte normal para caber na largura do papel
         cab = []
+        # Destaque de pedido atualizado / edicao no topo (COMP-439)
+        _dst_edicao = _linhas_destaque_edicao(content, w, w_fis)
+        if _dst_edicao:
+            cab += _dst_edicao
         # Ajuste SINIEF 32/24: comanda de setor NUNCA e documento fiscal — aviso no TOPO.
         cab.append(AVISO_NAO_FISCAL)
         cab+=["*"*w, titulo.center(w), "*"*w]
@@ -2314,13 +2428,25 @@ def _fmt(content, jt, pt, imp=None):
         m=content.get("table_number","")
         if m: cab.append(f"Mesa: {m}")
         c2=content.get("customer_name","")
-        if c2: cab.append(f"Cliente: {c2}")
+        if c2:
+            # Em pedido editado (COMP-439), o cliente sobe para logo abaixo do cabecalho/numero
+            if _dst_edicao:
+                # Insere logo apos o numero do pedido (ou topo de cab se sem numero)
+                idx_ins = (cab.index(_lin_pedido(n)) + 1) if n and _lin_pedido(n) in cab else len(cab)
+                cab.insert(idx_ins, f"Cliente: {c2}")
+            else:
+                cab.append(f"Cliente: {c2}")
         if tipo=="kitchen":
             # v5.78: hora em BRT. O fallback antigo fazia fromisoformat(created_at).strftime —
             # imprimia a hora UTC crua (3h adiantada) em todo job vindo do agent-unified-poll.
             _,hora=_data_hora_brt(content)
             if hora: cab.append(f"Hora: {hora}")
-        cab.append(S)
+        # Bloco discriminando itens alterados/adicionados/removidos e versao (COMP-439)
+        _bl_edicao = _linhas_bloco_edicao(content, w)
+        if _bl_edicao:
+            cab += _bl_edicao
+        else:
+            cab.append(S)
 
         if _fs <= 0:
             # Fonte normal: comportamento original — tudo em string
