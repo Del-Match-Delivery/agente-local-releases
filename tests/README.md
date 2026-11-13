@@ -9,6 +9,8 @@ venv_build\Scripts\python.exe tests\test_sku_no_cupom.py   # SKU no cupom (v5.84
 venv_build\Scripts\python.exe tests\test_hora.py        # Data/Hora em horario de Brasilia
 venv_build\Scripts\python.exe tests\test_codepage.py    # acentos por impressora, modo ascii, pagina de teste, proc_job com 2 impressoras
 venv_build\Scripts\python.exe tests\test_ui_config.py   # tela Configuracoes REAL (abre por instantes): Acentos, Aplicar, Testar acentos, Conectar
+venv_build\Scripts\python.exe tests\test_instalador.py      # instalador: codigo CT, pastas, config, certificado (windows/truststore/certifi), codigo pendente
+venv_build\Scripts\python.exe tests\test_instalador_e2e.py  # instalador de verdade contra servidor local (abre janelas por instantes)
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\runtime_test.ps1 -Dist dist_5.80
 ```
 

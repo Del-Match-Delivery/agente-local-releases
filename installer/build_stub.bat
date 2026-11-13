@@ -1,49 +1,42 @@
 @echo off
 echo ============================================
-echo  Build: Stub Installer - Agente Local
+echo  Build: ComprouTai-Instalar.exe (instalador do agente)
 echo ============================================
 echo.
-
-:: Instala dependencias necessarias
-echo [1/3] Instalando dependencias...
-pip install pyinstaller pywin32 pillow --quiet
-if errorlevel 1 (
-    echo ERRO: Falha ao instalar dependencias.
+:: Usa o MESMO Python/PyInstaller do build do agente (venv_build), nao o pip do sistema.
+cd /d "%~dp0.."
+if not exist "venv_build\Scripts\python.exe" (
+    echo ERRO: venv_build nao encontrado. Rode a partir da pasta do projeto do agente.
     pause
     exit /b 1
 )
-
-:: Muda para a pasta do installer
-cd /d "%~dp0"
-
-:: Compila o stub installer
-echo [2/3] Compilando InstalarAgente.exe...
-pyinstaller ^
-    --onefile ^
-    --windowed ^
-    --name InstalarAgente ^
-    --add-data "icone.ico;." ^
-    --icon=icone.ico ^
-    stub_installer.py
+:: truststore + certifi: sem eles o instalador nao baixa em PDV com Windows sem a raiz do
+:: GitHub (CERTIFICATE_VERIFY_FAILED). O exe compilaria assim mesmo, so que sem a protecao;
+:: o teste unitario 6 barra o build se faltar algum dos dois.
+venv_build\Scripts\python.exe -m pip install --quiet --disable-pip-version-check truststore certifi
 if errorlevel 1 (
-    echo ERRO: Falha na compilacao. Tentando sem icone...
-    pyinstaller --onefile --windowed --name InstalarAgente stub_installer.py
-    if errorlevel 1 (
-        echo ERRO: Compilacao falhou.
-        pause
-        exit /b 1
-    )
+    echo ERRO: nao consegui instalar truststore/certifi no venv_build.
+    pause
+    exit /b 1
 )
-
-echo [3/3] Limpando arquivos temporarios...
-if exist build rmdir /s /q build
-if exist InstalarAgente.spec del InstalarAgente.spec
-
+echo [1/2] Compilando installer\dist\ComprouTai-Instalar.exe...
+venv_build\Scripts\python.exe -m PyInstaller --onefile --windowed --noconfirm --clean --log-level WARN ^
+    --name ComprouTai-Instalar --distpath installer\dist --workpath installer\build --specpath installer\build ^
+    installer\stub_installer.py
+if errorlevel 1 (
+    echo ERRO: compilacao falhou.
+    pause
+    exit /b 1
+)
+echo [2/2] Testes do instalador (unitarios + ponta a ponta contra servidor local)...
+venv_build\Scripts\python.exe tests\test_instalador.py
+if errorlevel 1 ( echo ERRO: teste unitario falhou. & pause & exit /b 1 )
+venv_build\Scripts\python.exe tests\test_instalador_e2e.py
+if errorlevel 1 ( echo ERRO: teste ponta a ponta falhou. & pause & exit /b 1 )
 echo.
 echo ============================================
-echo  SUCESSO!
-echo  Installer gerado em: dist\InstalarAgente.exe
-echo  Distribua esse arquivo para os clientes.
+echo  SUCESSO: installer\dist\ComprouTai-Instalar.exe
+echo  Publicar: bucket agent-downloads/windows/ComprouTai-Instalar.exe (Supabase)
+echo            e, por compatibilidade, o asset InstalarAgente.exe da tag "installer" no GitHub.
 echo ============================================
-echo.
 pause
