@@ -970,6 +970,25 @@ def _linha_codigo_item(item, imprime_barcode=False):
     if imprime_barcode and _valida_ean13(codigo): return f"[[EAN13:{codigo}]]"
     return f"  Cod: {codigo}"
 
+def _fmt_cpf_cnpj(doc):
+    """CPF (11 digitos) ou CNPJ (14) com mascara para o cupom ("CPF na nota:"); outro tamanho sai
+    como veio, vazio/None vira ""."""
+    d = "".join(ch for ch in str(doc or "") if ch.isdigit())
+    if len(d) == 11:
+        return f"{d[:3]}.{d[3:6]}.{d[6:9]}-{d[9:]}"
+    if len(d) == 14:
+        return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}"
+    return str(doc or "").strip()
+
+def _linha_cpf_na_nota(content):
+    """Linha "CPF na nota: <doc>" quando o pedido traz customer_cpf (orders.customer_cpf, pelo
+    enriquecimento do print_jobs.content, pelo agent-get-order ou pelo pedido do agent-jobs);
+    "" quando nao ha documento. Nao depende de print_customer_info: e o pedido do cliente para
+    a nota fiscal, nao dado de contato."""
+    if not isinstance(content, dict): return ""
+    doc = _fmt_cpf_cnpj(content.get("customer_cpf") or content.get("cpf_na_nota") or "")
+    return f"CPF na nota: {doc}" if doc else ""
+
 def _linha_sku_item(item):
     """Linha '  SKU: X' logo abaixo da linha do codigo de barras (v5.84), em todo cupom que tem a
     linha 'Cod:'. Sempre texto: SKU e codigo interno da loja, nao EAN, e nao vira barras.
@@ -2334,6 +2353,8 @@ def _fmt(content, jt, pt, imp=None):
         # Telefone do cliente (controlado por print_customer_info)
         ph=content.get("customer_phone","")
         if ph and show_phone: ll.append(f"Tel: {ph}")
+        _cpf=_linha_cpf_na_nota(content)
+        if _cpf: ll.append(_cpf)
         # AGENDADO: logo apos Cliente/Mesa/Tel e ANTES dos itens, com separador + negrito 2x2
         # (contrato do print_jobs.content; espelha o agente Tauri). Ausente => cupom igual.
         _ag=_linhas_agendado(content, w_fis)
@@ -2560,6 +2581,8 @@ def _fmt(content, jt, pt, imp=None):
         if c2: ll.append(f"Cliente: {c2}")
         ph=content.get("customer_phone","")
         if ph and show_phone: ll.append(f"Tel: {ph}")
+        _cpf=_linha_cpf_na_nota(content)
+        if _cpf: ll.append(_cpf)
         cod=content.get("pickup_code","")
         if cod: ll.append(f"Codigo: {cod}".center(w))
         # AGENDADO antes dos itens (mesma regra do cupom): quem retira precisa ver o horario
@@ -2619,6 +2642,8 @@ def _fmt(content, jt, pt, imp=None):
         if c2: ll.append(f"Cliente: {c2}")
         t2=content.get("customer_phone","")
         if t2 and show_phone: ll.append(f"Tel: {t2}")
+        _cpf=_linha_cpf_na_nota(content)
+        if _cpf: ll.append(_cpf)
         # AGENDADO antes dos itens (mesma regra do cupom): entrega agendada sai com o horario
         _ag=_linhas_agendado(content, w_fis)
         if _ag: ll.append(S); ll += _ag
@@ -3037,7 +3062,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.85"
+CURRENT_VERSION = "5.86"
 # AGLR-5: o manifesto vem do dominio proprio (espelho do version.json da main na EC2
 # PROJETOS, com os exe servidos de la). O caminho antigo do GitHub fica como RESERVA: ele
 # so funciona pelo redirect que o GitHub mantem desde a transferencia do repositorio para a
