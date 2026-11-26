@@ -862,6 +862,78 @@ def _escpos_estilo_base():
     elif el == 2: p += b"\x1b\x33\x28"   # espacado (40/180")
     return p
 
+# ── v5.87: ajustes de layout do cupom (aba Impressao). Todos opt-in: com a config ausente o
+# cupom e a comanda saem BYTE A BYTE iguais aos da v5.86 (tests/test_ajustes_cupom.py compara).
+#   negrito_obs ........ True = so as observacoes em negrito ('>>' do item e Obs/OBS do pedido)
+#   valores_mercado .... True = cupom do cliente com os valores na coluna da direita, como cupom
+#                        de mercado: nome sozinho, embaixo "2 x 6,00 ......... 12,00"
+#   fonte_nome_produto . 1 (Media) / 2 (Grande) = so o NOME do produto maior; adicionais e
+#                        observacao ficam no tamanho do cupom (cupom e comanda)
+#   formato_delivery ... "economico" / "compacto" = cupom do cliente de pedido de ENTREGA em
+#                        menos papel; ausente = completo
+#   loja_na_comanda .... True = nome da loja em negrito logo abaixo do titulo COZINHA / BAR
+def _negrito_obs():
+    """So as observacoes em negrito. Com 'negrito no cupom inteiro' tudo ja sai em negrito e
+    isto nao acrescenta nada."""
+    return bool(cfg.get("negrito_obs")) and not cfg.get("negrito_cupom")
+
+def _linhas_obs(texto, w):
+    """Linha(s) de observacao ja quebradas na palavra em w colunas e, com negrito_obs, em
+    negrito. A quebra vem ANTES do marcador: linha com [[...]] nao passa mais pelo
+    _quebrar_linhas_longas e sairia do papel. Sem negrito_obs = exatamente as linhas que o
+    _quebrar_linhas_longas do fim do _fmt produziria (cupom identico)."""
+    linhas = _quebrar_linhas_longas([texto], w)
+    if not _negrito_obs(): return linhas
+    return [f"[[B_ON]]{l}[[B_OFF]]" for l in linhas]
+
+def _bytes_obs_negrito(b):
+    """Mesmo negrito da observacao para o caminho em BYTES da comanda (fonte maior que normal)."""
+    return (b"\x1b\x45\x01" + b + b"\x1b\x45\x00") if _negrito_obs() else b
+
+def _valores_mercado():
+    return bool(cfg.get("valores_mercado"))
+
+def _fonte_nome_produto():
+    """Escala do nome do produto escolhida na aba (1=Media, 2=Grande) ou None = como antes."""
+    v = _fonte_valida(cfg.get("fonte_nome_produto"))
+    return v if v else None
+
+def _formato_delivery():
+    v = str(cfg.get("formato_delivery") or "").strip().lower()
+    return v if v in ("economico", "compacto") else None
+
+def _cents(v):
+    try: return int(v or 0)
+    except (TypeError, ValueError): return 0
+
+def _M(v):
+    """Valor no estilo cupom de mercado: sem 'R$' e com virgula (32,90)."""
+    try: return f"{int(v)/100:.2f}".replace(".", ",")
+    except Exception: return "0,00"
+
+def _par_quebrado(esq, dir_, w, cont=""):
+    """Como _par, mas um rotulo maior que o papel QUEBRA na palavra (continuacao com o recuo
+    cont) e o valor fica na ultima linha dele quando cabe; senao desce sozinho, alinhado a
+    direita. Nenhuma linha passa de w. Valor vazio = so o rotulo quebrado."""
+    esq = str(esq); dir_ = str(dir_)
+    if not dir_:
+        return _quebrar_linhas_longas([esq], w)
+    if len(esq) + 1 + len(dir_) <= w:
+        return _par(esq, dir_, w)
+    corpo = esq.lstrip(" "); lead = " " * (len(esq) - len(corpo))
+    partes = _wrap_linhas(corpo, w - len(lead))
+    if not partes:
+        return [dir_.rjust(w)]
+    linhas = [lead + partes[0]]
+    if len(partes) > 1:
+        linhas += _wrap_linhas(" ".join(partes[1:]), w, cont)
+    ult = linhas[-1]
+    if len(ult) + 1 + len(dir_) <= w:
+        linhas[-1] = ult + " " * (w - len(ult) - len(dir_)) + dir_
+    else:
+        linhas.append(dir_.rjust(w))
+    return linhas
+
 def _escpos_font_prefix():
     """Bytes ESC/POS do estado BASE do cupom (tamanho da impressora da vez + estilo geral).
     Mandado uma vez no inicio do payload; os marcadores [[FSB]]/OFF voltam para este estado."""
@@ -1012,7 +1084,7 @@ def _flag_print_barcode(content):
         return content.get("print_barcode") is True
     return _print_barcode_servidor is True
 
-_MARCADOR_RE = re.compile(r"\[\[(BIG_ORDER_ON|BIG_ORDER_OFF|NEG_ON|NEG_OFF|ALTO_ON|ALTO_OFF|FS[0-3]|FSB|EAN13:\d{13})\]\]")
+_MARCADOR_RE = re.compile(r"\[\[(BIG_ORDER_ON|BIG_ORDER_OFF|NEG_ON|NEG_OFF|B_ON|B_OFF|ALTO_ON|ALTO_OFF|FS[0-3]|FSB|EAN13:\d{13})\]\]")
 
 def _tem_marcador(texto):
     """True se a linha tem marcador ESC/POS que precisa virar bytes crus."""
@@ -1047,6 +1119,9 @@ def _substituir_marcadores_escpos(texto):
         # de caber em qualquer papel de 24+ colunas sem quebrar o horario no meio.
         elif tag == "ALTO_ON": partes.append(b"\x1b\x61\x01\x1b\x45\x01\x1d\x21\x01")
         elif tag == "ALTO_OFF": partes.append(_bytes_restaura_base())
+        # v5.87: negrito SEM centralizar (observacao): NEG_ON tambem centraliza (ESC a 1).
+        elif tag == "B_ON": partes.append(b"\x1b\x45\x01")
+        elif tag == "B_OFF": partes.append(b"\x1b\x45\x01" if cfg.get("negrito_cupom") else b"\x1b\x45\x00")
         elif tag == "FSB": partes.append(_bytes_restaura_base())
         elif tag.startswith("FS"): partes.append(_gs_fonte(int(tag[2])))   # tamanho por secao (v5.81)
         elif tag.startswith("EAN13:"): partes.append(_escpos_barcode_ean13(tag.split(":",1)[1]))
@@ -2283,7 +2358,10 @@ def _fmt(content, jt, pt, imp=None):
         if sc is None or sc == _fs:
             return [_li(q, nome, preco, w)]
         ws = max(8, w_fis // _FONTE_WMUL[sc])
-        return [f"[[FS{sc}]]{l}[[FSB]]" for l in _li(q, nome, preco, ws).split("\n")]
+        # v5.87: quebra NA PALAVRA na largura logica da secao. Ate a v5.86 o nome comprido ia
+        # inteiro para dentro do marcador e a impressora cortava no meio ("X-Burger Artes"/"anal"
+        # com 'Nome dos itens: Grande' em 58 mm). Linha que ja cabia sai igual.
+        return [f"[[FS{sc}]]{l}[[FSB]]" for l in _quebrar_linhas_longas(_li(q, nome, preco, ws).split("\n"), ws)]
 
     def _lin_pedido(n):
         """Numero do pedido em destaque: center+bold (NEG) + fonte da secao 'pedido' — padrao
@@ -2294,6 +2372,168 @@ def _fmt(content, jt, pt, imp=None):
         if sc is None: sc = max(2, _fs)
         sc = _fonte_que_cabe(sc, t, w_fis)
         return f"[[NEG_ON]][[FS{sc}]]{t}[[FSB]][[NEG_OFF]]"
+
+    # ── v5.87: ajustes de layout da aba Impressao (todos opt-in; sem config = v5.86) ─────────
+    _mercado = _valores_mercado()
+    _sn_cfg  = _fonte_nome_produto()   # 'Nome do produto' escolhido na aba; None = como antes
+    _sn_coz  = _sn_cfg                 # comanda: so a escolha nova (fonte_secoes nunca valeu la)
+
+    def _escala_nome(formato):
+        """Escala do nome do produto no cupom do cliente, ou None quando nada muda. A escolha
+        nova vence; sem ela, o 'Nome dos itens' antigo (fonte_secoes) vale nos layouts em que o
+        nome fica sem o preco ao lado (mercado/compacto). Nunca menor ou igual ao corpo."""
+        sn = _sn_cfg
+        if sn is None and (_mercado or formato == "compacto"):
+            sn = _fonte_secao("itens")
+        return sn if (sn is not None and sn > _fs) else None
+
+    def _nome_na_escala(texto, sn):
+        """Nome numa escala maior, quebrado na palavra na largura LOGICA dela (Grande em 58 mm
+        = 16 colunas): a impressora nunca corta a palavra no meio."""
+        ws = max(8, w_fis // _FONTE_WMUL[sn])
+        return [f"[[FS{sn}]]{l}[[FSB]]" for l in _quebrar_linhas_longas([texto], ws)]
+
+    def _nome_e_valor(texto, valor, sn):
+        """Nome com o valor alinhado a direita. Escala que NAO alarga (Media sobre Normal) mantem
+        as colunas: nome e valor crescem juntos na mesma linha. Escala que alarga (Grande/Extra)
+        nao tem coluna comum com o corpo: o nome vai sozinho e o valor desce, no tamanho normal."""
+        if sn is None:
+            return _par_quebrado(texto, valor, w)
+        if _FONTE_WMUL[sn] == _FONTE_WMUL[_fs]:
+            return [f"[[FS{sn}]]{l}[[FSB]]" for l in _par_quebrado(texto, valor, w)]
+        out = _nome_na_escala(texto, sn)
+        if valor: out += _par("", valor, w)
+        return out
+
+    def _itens_cliente(content, formato=None):
+        """Bloco de itens do cupom do CLIENTE (caixa, retirada, entrega). Sem nenhum ajuste novo
+        sai exatamente o laco que existia nos 3 cupons ate a v5.86."""
+        out = []
+        DP = "." * w
+        sn = _escala_nome(formato)
+        for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
+            out += _cab_categoria(_cat, w)
+            for item in _itens_cat:
+                size = _size_do_item(item)
+                q = _qtd_do_item(item); nome = _nome_com_tamanho(item); preco = _preco_do_item(item)
+                adds = [a for a in _adicionais_do_item(item)
+                        if not (size and a.get('nome','').strip()==size)]   # tamanho ja saiu no nome
+                extras = list(_linha_pai(item))
+                _cod_ln = _linha_codigo_item(item, _barcode_on)
+                if _cod_ln: extras.append(_cod_ln)
+                _sku_ln = _linha_sku_item(item)
+                if _sku_ln: extras.append(_sku_ln)
+                if formato == "compacto":
+                    # Uma linha por item com o valor FECHADO (item + adicionais) x quantidade;
+                    # adicionais so pelo nome, numa linha corrida.
+                    tot_i = q * (preco + sum(_cents(a.get("preco_cents")) for a in adds))
+                    val = (_M(tot_i) if _mercado else _R(tot_i)) if tot_i > 0 else ""
+                    out += _nome_e_valor(f"{q}x {nome}", val, sn)
+                    out += extras
+                    if adds:
+                        out += _quebrar_linhas_longas(["  + " + ", ".join(a.get('nome','') for a in adds)], w)
+                elif _mercado:
+                    # Cupom de mercado: nome sozinho; embaixo 'q x unitario ..... total' e os
+                    # adicionais com preco na MESMA coluna, ja multiplicados pela quantidade do
+                    # item (o preco do adicional e por unidade do item) — a coluna fecha com o
+                    # subtotal.
+                    out += _nome_na_escala(nome, sn) if sn else _quebrar_linhas_longas([nome], w)
+                    tot_i = q * preco
+                    out += _par_quebrado(f"  {q} x {_M(preco)}", _M(tot_i), w) if tot_i > 0 else [f"  {q} un"]
+                    out += extras
+                    for a in adds:
+                        pc = _cents(a.get("preco_cents"))
+                        out += _par_quebrado(f"  + {a.get('nome','')}", _M(pc * q) if pc else "", w, "    ")
+                else:
+                    if _sn_cfg is None or sn is None:
+                        out += _lin_item(item)   # como sempre (inclui o fonte_secoes['itens'] antigo)
+                    else:
+                        tot_i = q * preco
+                        out += _nome_e_valor(f"[ {q}x ]  {nome}", _R(tot_i) if tot_i > 0 else "", sn)
+                    out += extras
+                    for a in adds:
+                        pc = a.get("preco_cents",0)
+                        # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
+                        out.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
+                obs = _obs_do_item(item)
+                if obs: out += _linhas_obs(f"  >> {obs}", w)
+                if formato is None: out.append(DP)   # economico/compacto: sem pontilhado entre itens
+        return out
+
+    def _totais_cliente(sub, desc, ent, tx_serv, tot, formato=None):
+        """Subtotal/desconto/taxas/TOTAL do cupom do cliente. Mercado: valores com virgula na
+        coluna da direita e 'R$' so no TOTAL. Compacto: sem a linha de subtotal."""
+        out = []
+        if _mercado:
+            if sub and formato != "compacto": out += _par("Subtotal", _M(sub), w)
+            if desc and int(desc)>0: out += _par("Desconto", f"-{_M(desc)}", w)
+            if ent and int(ent)>0: out += _par("Taxa de entrega", _M(ent), w)
+            if tx_serv and int(tx_serv)>0: out += _par("Taxa de servico", _M(tx_serv), w)
+            out += _lin_valor("TOTAL", f"R$ {_M(tot)}", "total")
+            return out
+        # v5.81: _par empilha o valor quando nao cabe ao lado do rotulo (fonte Extra em 58 mm
+        # deixa 10 colunas; antes o f-string gerava linha maior que o papel e quebrava no meio).
+        if sub and formato != "compacto": out += _par("Subtotal:", _R(sub), w)
+        if desc and int(desc)>0: out += _par("Desconto:", f"-{_R(desc)}", w)
+        if ent and int(ent)>0: out += _par("Taxa entrega:", _R(ent), w)
+        if tx_serv and int(tx_serv)>0: out += _par("Taxa servico:", _R(tx_serv), w)
+        out += _lin_valor("TOTAL:", _R(tot), "total")
+        return out
+
+    def _endereco_corrido(content):
+        """Endereco de entrega numa frase so ('Entrega: Rua X, 12, Apto 3, Centro, Cidade - UF'),
+        continuacao recuada, com Ref/Obs entrega em linhas proprias. Mesmo leitor de campos do
+        bloco completo. Partes juntadas por virgula: com ' - ' a quebra deixava linha comecando
+        com '-'."""
+        bl = _bloco_endereco(content, w)
+        if not bl: return []
+        linhas = [str(l) for l in bl[2:]]   # sem o separador e o titulo
+        extras = [l for l in linhas if l.startswith(("Ref:", "Obs entrega:"))]
+        princ = [l for l in linhas if l not in extras]
+        if not princ: return extras
+        partes = _wrap_linhas("Entrega: " + ", ".join(princ), w)
+        out = partes[:1] + (_wrap_linhas(" ".join(partes[1:]), w, "  ") if len(partes) > 1 else [])
+        return out + extras
+
+    def _cab_entrega(content, formato, tp_padrao=""):
+        """Cabecalho do cupom de ENTREGA economico/compacto, entre o PEDIDO # e o AGENDADO."""
+        out = []
+        c2 = content.get("customer_name","")
+        ph = content.get("customer_phone","") if show_phone else ""
+        if formato == "economico":
+            data_brt,_ = _data_hora_brt(content)
+            tp = content.get("order_type","") or tp_padrao
+            rot = f"** {TL.get(tp,tp.upper())} **" if tp else ""
+            if data_brt and rot: out += _par(data_brt, rot, w)
+            elif data_brt: out.append(f"Data: {data_brt}")
+            elif rot: out.append(rot.center(w))
+            if c2 and ph: out += _par(f"Cliente: {c2}", ph, w)
+            elif c2: out.append(f"Cliente: {c2}")
+            elif ph: out.append(f"Tel: {ph}")
+        else:
+            if c2 and ph: out += _par(c2, ph, w)
+            elif c2: out.append(f"Cliente: {c2}")
+            elif ph: out.append(f"Tel: {ph}")
+        _cpf = _linha_cpf_na_nota(content)
+        if _cpf: out.append(_cpf)
+        if formato == "compacto": out += _endereco_corrido(content)   # o entregador le no topo
+        return out
+
+    def _fim_cliente(content, formato, titulo, com_rodape):
+        """Fim do cupom do cliente: endereco de entrega, rodape e separador final."""
+        if formato == "compacto":
+            return [S]   # endereco ja saiu no topo; sem rodape
+        out = []
+        if formato == "economico":
+            end = _endereco_corrido(content)
+            if end: out.append(S); out += end
+        else:
+            # Endereço de entrega — bloco robusto que aceita varios nomes de campo
+            out += _bloco_endereco(content, w, titulo=titulo)
+        rod = content.get("footer_message","") if com_rodape else ""
+        if rod: out.append(S); out += _lin_centro(rod, "rodape")
+        out.append(S)
+        return out
 
     # Flags de exibição configuráveis
     show_phone    = content.get("print_customer_info", True)
@@ -2307,6 +2547,12 @@ def _fmt(content, jt, pt, imp=None):
     if tipo not in ("order","receipt","kitchen","bar","pickup","delivery","command","test_page",
                     "fiscal","danfce","pre_closing_simple","pre_closing_full"):
         tipo = "receipt"
+    # v5.87: formato economico/compacto so no cupom do CLIENTE de pedido de ENTREGA (balcao,
+    # mesa, conferencia, retirada e comanda nunca mudam de formato).
+    _fmt_ent = None
+    if tipo in ("order","receipt","delivery"):
+        _otp = str(content.get("order_type","") or ("delivery" if tipo=="delivery" else "")).strip().lower()
+        if _otp in ("delivery","entrega"): _fmt_ent = _formato_delivery()
 
     # CUPOM FISCAL (NFC-e): documento DIFERENTE do cupom do pedido. Sai por modulo proprio,
     # justamente para nao se misturar com o cupom operacional, e tudo vem do XML autorizado.
@@ -2329,32 +2575,37 @@ def _fmt(content, jt, pt, imp=None):
         # sair com o nome de quem vendeu. company_name (razao social) segue tendo prioridade.
         ne=content.get("company_name","") or _loja_do_job(content) or cfg.get("restaurant_name","")
         if ne: ll += _lin_centro(ne.upper(), "loja")
-        e=content.get("company_address","")
-        if e: ll.append(e.center(w))
-        t=content.get("company_phone","")
-        if t: ll.append(f"Tel: {t}".center(w))
+        # v5.87: entrega economica/compacta — cabecalho so com o nome da loja
+        if _fmt_ent is None:
+            e=content.get("company_address","")
+            if e: ll.append(e.center(w))
+            t=content.get("company_phone","")
+            if t: ll.append(f"Tel: {t}".center(w))
         ll.append(S)
         # Selo da loja: so em filial impressa no concentrador (servidor decide).
         _selo=_linhas_selo_loja(content, w)
         if _selo: ll += _selo + [S]
         n=content.get("numero","") or content.get("order_number","")
         if n: ll.append(_lin_pedido(n))
-        data_brt,_=_data_hora_brt(content)   # BRT: created_at_brt do servidor ou created_at (UTC) convertido
-        if data_brt: ll.append(f"Data: {data_brt}")
-        tp=content.get("order_type","")
-        if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
-        c2=content.get("customer_name","")
-        if c2: ll.append(f"Cliente: {c2}")
-        # Mesa: só mostra se for diferente do tipo de pedido (evita "Mesa: COMER AQUI")
-        m=content.get("table_number","")
-        tipos_pedido = list(TL.keys()) + list(TL.values()) + ["pickup","counter","dine_in","takeaway","delivery","retirada","mesa","balcao","comer aqui"]
-        if m and str(m).lower() not in [x.lower() for x in tipos_pedido]:
-            ll.append(f"Mesa: {m}")
-        # Telefone do cliente (controlado por print_customer_info)
-        ph=content.get("customer_phone","")
-        if ph and show_phone: ll.append(f"Tel: {ph}")
-        _cpf=_linha_cpf_na_nota(content)
-        if _cpf: ll.append(_cpf)
+        if _fmt_ent is None:
+            data_brt,_=_data_hora_brt(content)   # BRT: created_at_brt do servidor ou created_at (UTC) convertido
+            if data_brt: ll.append(f"Data: {data_brt}")
+            tp=content.get("order_type","")
+            if tp: ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
+            c2=content.get("customer_name","")
+            if c2: ll.append(f"Cliente: {c2}")
+            # Mesa: só mostra se for diferente do tipo de pedido (evita "Mesa: COMER AQUI")
+            m=content.get("table_number","")
+            tipos_pedido = list(TL.keys()) + list(TL.values()) + ["pickup","counter","dine_in","takeaway","delivery","retirada","mesa","balcao","comer aqui"]
+            if m and str(m).lower() not in [x.lower() for x in tipos_pedido]:
+                ll.append(f"Mesa: {m}")
+            # Telefone do cliente (controlado por print_customer_info)
+            ph=content.get("customer_phone","")
+            if ph and show_phone: ll.append(f"Tel: {ph}")
+            _cpf=_linha_cpf_na_nota(content)
+            if _cpf: ll.append(_cpf)
+        else:
+            ll += _cab_entrega(content, _fmt_ent)
         # AGENDADO: logo apos Cliente/Mesa/Tel e ANTES dos itens, com separador + negrito 2x2
         # (contrato do print_jobs.content; espelha o agente Tauri). Ausente => cupom igual.
         _ag=_linhas_agendado(content, w_fis)
@@ -2365,25 +2616,7 @@ def _fmt(content, jt, pt, imp=None):
             ll += _bl_edicao
         else:
             ll.append(S)
-        DP="."*w
-        for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
-            ll += _cab_categoria(_cat, w)
-            for item in _itens_cat:
-                size=_size_do_item(item)
-                ll += _lin_item(item)
-                ll += _linha_pai(item)
-                _cod_ln=_linha_codigo_item(item, _barcode_on)
-                if _cod_ln: ll.append(_cod_ln)
-                _sku_ln=_linha_sku_item(item)
-                if _sku_ln: ll.append(_sku_ln)
-                for a in _adicionais_do_item(item):
-                    if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
-                    pc=a.get("preco_cents",0)
-                    # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
-                    ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
-                obs=_obs_do_item(item)
-                if obs: ll.append(f"  >> {obs}")
-                ll.append(DP)
+        ll += _itens_cliente(content, _fmt_ent)   # v5.87: laco unico dos 3 cupons do cliente
         ll.append(S)
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         ent=content.get("delivery_fee_cents",0); tot=content.get("total_cents",0)
@@ -2406,24 +2639,17 @@ def _fmt(content, jt, pt, imp=None):
         if not tot:
             tot = max(0, int(sub or 0) - int(desc or 0) + int(ent or 0) + int(tx_serv or 0))
 
-        # v5.81: _par empilha o valor quando nao cabe ao lado do rotulo (fonte Extra em 58 mm
-        # deixa 10 colunas; antes o f-string gerava linha maior que o papel e quebrava no meio).
-        if sub: ll += _par("Subtotal:", _R(sub), w)
-        if desc and int(desc)>0: ll += _par("Desconto:", f"-{_R(desc)}", w)
-        if ent and int(ent)>0: ll += _par("Taxa entrega:", _R(ent), w)
-        if tx_serv and int(tx_serv)>0: ll += _par("Taxa servico:", _R(tx_serv), w)
-        ll += _lin_valor("TOTAL:", _R(tot), "total")
+        ll += _totais_cliente(sub, desc, ent, tx_serv, tot, _fmt_ent)
         pg=content.get("payment_method","")
         if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
         cod=content.get("pickup_code","")
         if cod: ll.append("="*w); ll.append(f"RETIRADA: {cod}".center(w)); ll.append("="*w)
         obs2=content.get("notes","")
-        if obs2: ll.append(S); ll.append(f"Obs: {obs2}")
-        # Endereço de entrega (delivery) — bloco robusto que aceita varios nomes de campo
-        ll += _bloco_endereco(content, w, titulo="ENTREGA:")
-        rod=content.get("footer_message","")
-        if rod: ll.append(S); ll += _lin_centro(rod, "rodape")
-        ll.append(S)
+        if obs2:
+            if _fmt_ent is None: ll.append(S)
+            ll += _linhas_obs(f"Obs: {obs2}", w)
+        # Endereço de entrega (delivery) + rodape + separador final
+        ll += _fim_cliente(content, _fmt_ent, "ENTREGA:", True)
     elif tipo in ("kitchen","bar"):
         titulo = "COZINHA" if tipo=="kitchen" else "BAR"
         # Cabecalho sempre em fonte normal para caber na largura do papel
@@ -2438,7 +2664,14 @@ def _fmt(content, jt, pt, imp=None):
         # Selo da loja LOGO ABAIXO do titulo, antes do numero do pedido: na matriz que
         # concentra as filiais, produzir o pedido da loja errada e o erro mais caro que
         # existe aqui — quem esta na chapa tem que ler a loja antes de qualquer outra coisa.
-        cab += _linhas_selo_loja(content, w)
+        _selo_coz = _linhas_selo_loja(content, w)
+        # v5.87: nome da loja na comanda (opt-in na aba Impressao), em negrito de tamanho normal
+        # (cabe em 58 mm), nome comprido quebra em vez de cortar. Com o selo de filial ligado pelo
+        # servidor a loja ja esta no papel: nao repete.
+        if cfg.get("loja_na_comanda") and not _selo_coz:
+            _nl = _loja_do_job(content) or cfg.get("restaurant_name","")
+            if _nl: cab += [f"[[NEG_ON]]{l}[[NEG_OFF]]" for l in _wrap_linhas(str(_nl).upper(), w)]
+        cab += _selo_coz
         n=content.get("numero","") or content.get("order_number","")
         if n: cab.append(_lin_pedido(n))
         # AGENDADO dentro do bloco grande (2x2), junto do numero/tipo/mesa: e o dado que define
@@ -2480,7 +2713,12 @@ def _fmt(content, jt, pt, imp=None):
                 ll += _cab_categoria(_cat, w)
                 for item in _itens_cat:
                     size=_size_do_item(item)
-                    q=_qtd_do_item(item); ll.append(f"[ {q}x ]  {_nome_com_tamanho(item)}")
+                    q=_qtd_do_item(item)
+                    if _sn_coz:   # v5.87: so o nome maior; adicionais e observacao em normal
+                        ll += [f"[[FS{_sn_coz}]]{_l}[[FSB]]" for _l in _quebrar_linhas_longas(
+                            [f"[ {q}x ]  {_nome_com_tamanho(item)}"], max(8, w // _FONTE_WMUL[_sn_coz]))]
+                    else:
+                        ll.append(f"[ {q}x ]  {_nome_com_tamanho(item)}")
                     ll += _linha_pai(item)
                     _cod_ln=_linha_codigo_item(item, _barcode_on)
                     if _cod_ln: ll.append(_cod_ln)
@@ -2490,12 +2728,12 @@ def _fmt(content, jt, pt, imp=None):
                         if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                         ll.append(f"  + {a.get('nome','')}{_rota_sufixo(a)}")
                     obs=_obs_do_item(item)
-                    if obs: ll.append(f"  >> {obs}")
+                    if obs: ll += _linhas_obs(f"  >> {obs}", w)
                     ll.append(DP)
             # Um setor pode receber comanda sem item proprio (ex: bar so com bebida de combo)
             if not itens: ll.append("  (sem itens para este setor)"); ll.append(DP)
             obs2=content.get("notes","")
-            if obs2: ll.append(S); ll.append(f"OBS: {obs2}")
+            if obs2: ll.append(S); ll += _linhas_obs(f"OBS: {obs2}", w)
             ll.append(S)
         else:
             # Fonte grande: retorna bytes com comandos ESC/POS inline.
@@ -2529,11 +2767,11 @@ def _fmt(content, jt, pt, imp=None):
                     q=_qtd_do_item(item)
                     size=_size_do_item(item)
                     nome=_nome_com_tamanho(item)
-                    parts.append(FBIG)
+                    parts.append(_gs_fonte(max(_fs, _sn_coz or 0)))   # v5.87: Nome do produto maior que a base
                     # Quebra NA PALAVRA na largura logica da fonte (v5.81): em 2x2 cada letra
                     # ocupa 2 colunas e um nome comprido estourava o papel — a impressora
                     # quebrava no meio da palavra ("Calabre"/"sa").
-                    for _lx in _quebrar_linhas_longas([f"[ {q}x ]  {nome}"], max(8, w // _FONTE_WMUL[_fs])):
+                    for _lx in _quebrar_linhas_longas([f"[ {q}x ]  {nome}"], max(8, w // _FONTE_WMUL[max(_fs, _sn_coz or 0)])):
                         parts.append(enc(_lx))
                     parts.append(FNORMAL)
                     for linha in _linha_pai(item): parts.append(enc(linha))
@@ -2545,7 +2783,7 @@ def _fmt(content, jt, pt, imp=None):
                         if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
                         parts.append(encq(f"  + {a.get('nome','')}{_rota_sufixo(a)}"))
                     obs=_obs_do_item(item)
-                    if obs: parts.append(encq(f"  >> {obs}"))
+                    if obs: parts.append(_bytes_obs_negrito(encq(f"  >> {obs}")))
                     parts.append(enc(DP_str))
             # Um setor pode receber comanda sem item proprio (ex: bar so com bebida de combo)
             if not itens:
@@ -2553,7 +2791,7 @@ def _fmt(content, jt, pt, imp=None):
             obs2=content.get("notes","")
             if obs2:
                 parts.append(enc(S))
-                parts.append(encq(f"OBS: {obs2}"))
+                parts.append(_bytes_obs_negrito(encq(f"OBS: {obs2}")))
             parts.append(enc(S))
             parts.append(FNORMAL)
             parts.append(_escpos_sufixo())  # avanço + corte (configuraveis desde a v5.81)
@@ -2565,8 +2803,9 @@ def _fmt(content, jt, pt, imp=None):
         # sair com o nome de quem vendeu. company_name (razao social) segue tendo prioridade.
         ne=content.get("company_name","") or _loja_do_job(content) or cfg.get("restaurant_name","")
         if ne: ll += _lin_centro(ne.upper(), "loja")
-        e=content.get("company_address","")
-        if e: ll.append(e.center(w))
+        if _fmt_ent is None:   # v5.87: entrega economica/compacta — so o nome da loja
+            e=content.get("company_address","")
+            if e: ll.append(e.center(w))
         ll.append(S)
         # Selo da loja: so em filial impressa no concentrador (servidor decide).
         _selo=_linhas_selo_loja(content, w)
@@ -2589,35 +2828,15 @@ def _fmt(content, jt, pt, imp=None):
         _ag=_linhas_agendado(content, w_fis)
         if _ag: ll.append(S); ll += _ag
         ll.append(S)
-        DP="."*w
-        for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
-            ll += _cab_categoria(_cat, w)
-            for item in _itens_cat:
-                size=_size_do_item(item)
-                ll += _lin_item(item)
-                ll += _linha_pai(item)
-                _cod_ln=_linha_codigo_item(item, _barcode_on)
-                if _cod_ln: ll.append(_cod_ln)
-                _sku_ln=_linha_sku_item(item)
-                if _sku_ln: ll.append(_sku_ln)
-                for a in _adicionais_do_item(item):
-                    if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
-                    pc=a.get("preco_cents",0)
-                    # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
-                    ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
-                obs=_obs_do_item(item)
-                if obs: ll.append(f"  >> {obs}")
-                ll.append(DP)
+        ll += _itens_cliente(content, _fmt_ent)   # v5.87: laco unico dos 3 cupons do cliente
         ll.append(S)
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         tot=content.get("total_cents",0)
-        if sub: ll += _par("Subtotal:", _R(sub), w)
-        if desc and int(desc)>0: ll += _par("Desconto:", f"-{_R(desc)}", w)
-        ll += _lin_valor("TOTAL:", _R(tot), "total")
+        ll += _totais_cliente(sub, desc, 0, 0, tot)
         pg=content.get("payment_method","")
         if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
         obs2=content.get("notes","")
-        if obs2: ll.append(S); ll.append(f"Obs: {obs2}")
+        if obs2: ll.append(S); ll += _linhas_obs(f"Obs: {obs2}", w)
         ll.append(S)
     elif tipo=="delivery":
         # Ajuste SINIEF 32/24: cupom sem NFC-e autorizada avisa que nao e documento fiscal
@@ -2626,61 +2845,45 @@ def _fmt(content, jt, pt, imp=None):
         # sair com o nome de quem vendeu. company_name (razao social) segue tendo prioridade.
         ne=content.get("company_name","") or _loja_do_job(content) or cfg.get("restaurant_name","")
         if ne: ll += _lin_centro(ne.upper(), "loja")
-        e=content.get("company_address","")
-        if e: ll.append(e.center(w))
+        if _fmt_ent is None:   # v5.87: entrega economica/compacta — so o nome da loja
+            e=content.get("company_address","")
+            if e: ll.append(e.center(w))
         ll.append(S)
         # Selo da loja: so em filial impressa no concentrador (servidor decide).
         _selo=_linhas_selo_loja(content, w)
         if _selo: ll += _selo + [S]
         n=content.get("numero","") or content.get("order_number","")
         if n: ll.append(_lin_pedido(n))
-        data_brt,_=_data_hora_brt(content)   # BRT: created_at_brt do servidor ou created_at (UTC) convertido
-        if data_brt: ll.append(f"Data: {data_brt}")
-        tp=content.get("order_type","delivery")
-        ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
-        c2=content.get("customer_name","")
-        if c2: ll.append(f"Cliente: {c2}")
-        t2=content.get("customer_phone","")
-        if t2 and show_phone: ll.append(f"Tel: {t2}")
-        _cpf=_linha_cpf_na_nota(content)
-        if _cpf: ll.append(_cpf)
+        if _fmt_ent is None:
+            data_brt,_=_data_hora_brt(content)   # BRT: created_at_brt do servidor ou created_at (UTC) convertido
+            if data_brt: ll.append(f"Data: {data_brt}")
+            tp=content.get("order_type","delivery")
+            ll.append(f"** {TL.get(tp,tp.upper())} **".center(w))
+            c2=content.get("customer_name","")
+            if c2: ll.append(f"Cliente: {c2}")
+            t2=content.get("customer_phone","")
+            if t2 and show_phone: ll.append(f"Tel: {t2}")
+            _cpf=_linha_cpf_na_nota(content)
+            if _cpf: ll.append(_cpf)
+        else:
+            ll += _cab_entrega(content, _fmt_ent, "delivery")
         # AGENDADO antes dos itens (mesma regra do cupom): entrega agendada sai com o horario
         _ag=_linhas_agendado(content, w_fis)
         if _ag: ll.append(S); ll += _ag
         ll.append(S)
-        DP="."*w
-        for _cat, _itens_cat in _grupos_por_categoria(_itens_do_content(content), _agrupar_cat):
-            ll += _cab_categoria(_cat, w)
-            for item in _itens_cat:
-                size=_size_do_item(item)
-                ll += _lin_item(item)
-                ll += _linha_pai(item)
-                _cod_ln=_linha_codigo_item(item, _barcode_on)
-                if _cod_ln: ll.append(_cod_ln)
-                _sku_ln=_linha_sku_item(item)
-                if _sku_ln: ll.append(_sku_ln)
-                for a in _adicionais_do_item(item):
-                    if size and a.get('nome','').strip()==size: continue  # ja saiu no cabecalho
-                    pc=a.get("preco_cents",0)
-                    # Sem sufixo de setor aqui: cupom do cliente nao mostra roteamento interno
-                    ll.append(f"  + {a.get('nome','')}{f' {_R(pc)}' if pc else ''}")
-                obs=_obs_do_item(item)
-                if obs: ll.append(f"  >> {obs}")
-                ll.append(DP)
+        ll += _itens_cliente(content, _fmt_ent)   # v5.87: laco unico dos 3 cupons do cliente
         ll.append(S)
         sub=content.get("subtotal_cents",0); desc=content.get("discount_cents",0)
         ent=content.get("delivery_fee_cents",0); tot=content.get("total_cents",0)
-        if sub: ll += _par("Subtotal:", _R(sub), w)
-        if desc and int(desc)>0: ll += _par("Desconto:", f"-{_R(desc)}", w)
-        if ent and int(ent)>0: ll += _par("Taxa entrega:", _R(ent), w)
-        ll += _lin_valor("TOTAL:", _R(tot), "total")
+        ll += _totais_cliente(sub, desc, ent, 0, tot, _fmt_ent)
         pg=content.get("payment_method","")
         if pg and show_payment: ll.append(f"Pagamento: {PL.get(pg.lower(),pg)}")
         obs2=content.get("notes","")
-        if obs2: ll.append(S); ll.append(f"Obs: {obs2}")
+        if obs2:
+            if _fmt_ent is None: ll.append(S)
+            ll += _linhas_obs(f"Obs: {obs2}", w)
         # Endereço de entrega — bloco robusto que aceita varios nomes de campo
-        ll += _bloco_endereco(content, w, titulo="ENDERECO:")
-        ll.append(S)
+        ll += _fim_cliente(content, _fmt_ent, "ENDERECO:", False)
     elif tipo=="command":
         # v5.80: BYTES, nao texto. Como texto, o '\xfa' (pulso da gaveta) passava pelo codepage:
         # em cp850 virava 0xA3 e em utf8 virava 2 bytes (C3 BA), deixando um byte solto no papel.
@@ -3062,7 +3265,7 @@ def poll():
     else: status_poll="Ativo - aguardando"
     _atualizar_icone()
 
-CURRENT_VERSION = "5.86"
+CURRENT_VERSION = "5.87"
 # AGLR-5: o manifesto vem do dominio proprio (espelho do version.json da main na EC2
 # PROJETOS, com os exe servidos de la). O caminho antigo do GitHub fica como RESERVA: ele
 # so funciona pelo redirect que o GitHub mantem desde a transferencia do repositorio para a
@@ -4385,8 +4588,25 @@ def abrir_config(auto=False):
     # ── ABA IMPRESSAO (v5.81): padrao de impressao do cupom. Cada controle salva NA HORA
     # (mesmo comportamento dos campos da aba Impressoras) e vale para o proximo pedido;
     # nenhum deles mexe no layout fiscal (DANFE), que tem regras proprias. ──
+    # v5.87: a aba ganhou Itens do cupom, Cupom de delivery e Comanda e passou da altura da
+    # janela (700 px; PDV com tela de 768): o conteudo fica num Canvas com barra de rolagem.
     fIm=ttk.Frame(nb); nb.add(fIm,text="Impressao")
-    imroot=tk.Frame(fIm,bg="#1e1e2e"); imroot.pack(fill="both",expand=True)
+    _im_cv=tk.Canvas(fIm,bg="#1e1e2e",highlightthickness=0,bd=0,yscrollincrement=20)
+    _im_sb=ttk.Scrollbar(fIm,orient="vertical",command=_im_cv.yview)
+    _im_cv.configure(yscrollcommand=_im_sb.set)
+    _im_sb.pack(side="right",fill="y"); _im_cv.pack(side="left",fill="both",expand=True)
+    imroot=tk.Frame(_im_cv,bg="#1e1e2e")
+    _im_win=_im_cv.create_window((0,0),window=imroot,anchor="nw")
+    imroot.bind("<Configure>",lambda e:_im_cv.configure(scrollregion=_im_cv.bbox("all")))
+    _im_cv.bind("<Configure>",lambda e:_im_cv.itemconfigure(_im_win,width=e.width))
+    def _im_roda(e):
+        """Roda do mouse rola a aba quando o ponteiro esta sobre ela (em qualquer controle dela)."""
+        try:
+            wd=e.widget
+            while wd is not None and wd is not _im_cv: wd=getattr(wd,"master",None)
+            if wd is _im_cv: _im_cv.yview_scroll(-3 if e.delta>0 else 3,"units")
+        except Exception: pass
+    w.bind("<MouseWheel>",_im_roda,add="+")
     imroot.columnconfigure(0,weight=1); imroot.columnconfigure(1,weight=1)
 
     def _salva_im(chave, valor):
@@ -4420,6 +4640,16 @@ def abrir_config(auto=False):
             b.pack(side="left",padx=2); bts.append(b)
         _pinta(idx_atual)
 
+    def _rotulo_linha(parent, texto):
+        """Linha 'Rotulo  [botoes]' dentro de um grupo (mesmo desenho de 'Papel e corte')."""
+        fr=tk.Frame(parent,bg="#1e1e2e"); fr.pack(anchor="w",fill="x")
+        tk.Label(fr,text=texto,bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9),
+                 width=15,anchor="w").pack(side="left",padx=(8,0))
+        return fr
+
+    _CHK=dict(bg="#1e1e2e",fg="#cdd6f4",selectcolor="#313244",activebackground="#1e1e2e",
+              activeforeground="#cdd6f4",font=("Segoe UI",9))
+
     # Tamanho base do cupom inteiro
     g1=_grupo_im("Tamanho da letra — cupom inteiro",
         "Vale do cabecalho ao rodape, em todas as impressoras (por impressora: aba Impressoras, campo Fonte). "
@@ -4427,12 +4657,12 @@ def abrir_config(auto=False):
         "sobra metade / um terco das colunas e nomes compridos quebram em mais linhas.", 0, 0, 2)
     _botoes_escolha(g1, _FONTE_NOMES, _fonte_cfg(), lambda i:_salva_im("font_size", i))
 
-    # Destaques por secao
+    # Destaques por secao (v5.87: o nome dos itens saiu daqui e virou 'Nome do produto')
     g2=_grupo_im("Destaques por secao",
-        "'Herda' segue o tamanho do cupom. No Nº do pedido, 'Auto' = Grande (como sempre foi).", 0, 1)
+        "'Herda' segue o tamanho do cupom. No Nº do pedido, 'Auto' = Grande (como sempre foi). "
+        "O nome dos produtos fica em 'Itens do cupom'.", 0, 1)
     for _k,_rot,_her in [("loja","Nome da loja","Herda"),("pedido","N. do pedido","Auto (Grande)"),
-                         ("itens","Nome dos itens","Herda"),("total","TOTAL","Herda"),
-                         ("rodape","Rodape","Herda")]:
+                         ("total","TOTAL","Herda"),("rodape","Rodape","Herda")]:
         _frs=tk.Frame(g2,bg="#1e1e2e"); _frs.pack(anchor="w",padx=8,pady=1,fill="x")
         tk.Label(_frs,text=_rot,bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9),width=14,anchor="w").pack(side="left")
         _cbx=ttk.Combobox(_frs,values=[_her]+list(_FONTE_NOMES),width=13,state="readonly")
@@ -4444,30 +4674,69 @@ def abrir_config(auto=False):
             else: fs[k]=list(_FONTE_NOMES).index(sel)
             _salva_im("fonte_secoes", fs or None)
         _cbx.bind("<<ComboboxSelected>>",lambda e,k=_k,cb=_cbx,her=_her:_muda_sec(e,k,cb,her))
+        # rolar a aba com a roda por cima do combo NAO pode trocar o tamanho escolhido
+        _cbx.bind("<MouseWheel>",lambda e:"break")
         _cbx.pack(side="left",padx=4)
     tk.Frame(g2,bg="#1e1e2e",height=4).pack()
 
-    # Estilo
-    g3=_grupo_im("Estilo","",1,1)
-    _neg_var=tk.BooleanVar(value=bool(cfg.get("negrito_cupom")))
+    # Estilo (v5.87: negrito virou escolha de tres; 'So observacoes' e novo)
+    g3=_grupo_im("Estilo",
+        "Negrito 'So observacoes': o '>>' do item e a Obs do pedido, no cupom e na comanda. "
+        "'Cupom inteiro' e para impressora que sai fraca.", 1, 1)
+    tk.Label(g3,text="Negrito:",bg="#1e1e2e",fg="#cdd6f4",font=("Segoe UI",9)).pack(anchor="w",padx=8,pady=(2,0))
+    _neg_idx=2 if cfg.get("negrito_cupom") else (1 if cfg.get("negrito_obs") else 0)
+    def _muda_negrito(i):
+        _salva_im("negrito_cupom", True if i==2 else None)
+        _salva_im("negrito_obs", True if i==1 else None)
+    _botoes_escolha(g3,["Nenhum","So observacoes","Cupom inteiro"],_neg_idx,_muda_negrito)
     _escu_var=tk.BooleanVar(value=bool(cfg.get("mais_escuro")))
-    for _var,_txt_cb,_chv in [(_neg_var,"Negrito no cupom inteiro (impressora que sai 'fraca')","negrito_cupom"),
-                              (_escu_var,"Impressao mais escura (passada dupla)","mais_escuro")]:
-        tk.Checkbutton(g3,text=_txt_cb,variable=_var,
-            command=lambda v=_var,c=_chv:_salva_im(c, True if v.get() else None),
-            bg="#1e1e2e",fg="#cdd6f4",selectcolor="#313244",activebackground="#1e1e2e",
-            activeforeground="#cdd6f4",font=("Segoe UI",9)).pack(anchor="w",padx=8,pady=1)
+    tk.Checkbutton(g3,text="Impressao mais escura (passada dupla)",variable=_escu_var,
+        command=lambda:_salva_im("mais_escuro", True if _escu_var.get() else None),
+        **_CHK).pack(anchor="w",padx=8,pady=1)
     tk.Label(g3,text="Espaco entre linhas:",bg="#1e1e2e",fg="#cdd6f4",
              font=("Segoe UI",9)).pack(anchor="w",padx=8,pady=(6,0))
     _esp=cfg.get("espaco_linhas"); _esp_idx=_esp if _esp in (0,2) else 1
     _botoes_escolha(g3,["Compacto","Normal","Espacado"],_esp_idx,
                     lambda i:_salva_im("espaco_linhas", None if i==1 else i))
 
+    # Itens do cupom (v5.87)
+    g5=_grupo_im("Itens do cupom",
+        "Coluna a direita = cupom de mercado: o nome fica sozinho e embaixo vem '2 x 6,00' com o total na "
+        "coluna da direita; adicional com preco entra na mesma coluna. Nome do produto: so o nome cresce, "
+        "adicionais e observacao ficam em letra normal (vale tambem na comanda).", 0, 2)
+    _botoes_escolha(_rotulo_linha(g5,"Valores"),["Ao lado do nome","Coluna a direita"],
+                    1 if cfg.get("valores_mercado") else 0,
+                    lambda i:_salva_im("valores_mercado", True if i==1 else None))
+    _fnp=_fonte_nome_produto()
+    if _fnp is None: _fnp=_fonte_secao("itens") or 0   # quem ajustou 'Nome dos itens' na v5.81
+    def _muda_nome_prod(i):
+        _fsx=dict(cfg.get("fonte_secoes") or {})
+        if "itens" in _fsx:   # a escolha nova substitui o 'Nome dos itens' antigo
+            _fsx.pop("itens"); _salva_im("fonte_secoes", _fsx or None)
+        _salva_im("fonte_nome_produto", None if i==0 else i)
+    _botoes_escolha(_rotulo_linha(g5,"Nome do produto"),["Normal","Media","Grande"],min(2,_fnp),_muda_nome_prod)
+
+    # Cupom de delivery (v5.87)
+    g6=_grupo_im("Cupom de delivery",
+        "So o cupom do cliente em pedido de ENTREGA. Economico: a mesma informacao em menos papel (cabecalho "
+        "so com o nome da loja, sem pontilhado entre itens, endereco corrido). Compacto: so o que a entrega "
+        "precisa (cliente e endereco no topo, um item por linha com o valor fechado, taxa, total e pagamento).", 1, 2)
+    _FORMATOS=[("Completo",None),("Economico","economico"),("Compacto","compacto")]
+    _botoes_escolha(g6,[n for n,_ in _FORMATOS],[v for _,v in _FORMATOS].index(_formato_delivery()),
+                    lambda i:_salva_im("formato_delivery",_FORMATOS[i][1]))
+
+    # Comanda (v5.87)
+    g7=_grupo_im("Comanda (cozinha e bar)","",0,3,2)
+    _lojac_var=tk.BooleanVar(value=bool(cfg.get("loja_na_comanda")))
+    tk.Checkbutton(g7,text="Nome da loja no topo da comanda (em negrito, logo abaixo de COZINHA / BAR)",
+        variable=_lojac_var,command=lambda:_salva_im("loja_na_comanda", True if _lojac_var.get() else None),
+        **_CHK).pack(anchor="w",padx=8,pady=(2,6))
+
     # Papel, corte e vias
     g4=_grupo_im("Papel e corte",
         "Largura: quando o servidor nao manda a largura no job, o cupom cai em 48 colunas; loja com bobina "
         "de 58 mm ajusta aqui (ou por impressora, campo Colunas). Vias: so o cupom do cliente — comanda de "
-        "setor e cupom fiscal saem sempre em 1 via.", 0, 2, 2)
+        "setor e cupom fiscal saem sempre em 1 via.", 0, 4, 2)
     _fr_pap=tk.Frame(g4,bg="#1e1e2e"); _fr_pap.pack(anchor="w",fill="x")
     _LARGURAS_PAPEL=[("Auto",None),("58mm",32),("76mm",42),("80mm",48)]
     _pw_cfg=_colunas_validas(cfg.get("paper_width_cols"))
@@ -4500,43 +4769,66 @@ def abrir_config(auto=False):
     _av_cbx.set(str(_av_cfg)); _av_cbx.pack(side="left",padx=8)
     _av_cbx.bind("<<ComboboxSelected>>",
                  lambda e:_salva_im("avanco_linhas", None if _av_cbx.get()=="5" else int(_av_cbx.get())))
+    _av_cbx.bind("<MouseWheel>",lambda e:"break")
     tk.Label(_fr_av,text="linhas (5 = padrao)",bg="#1e1e2e",fg="#6c7086",font=("Segoe UI",8)).pack(side="left")
 
-    # Cupom de teste com os ajustes atuais
+    # Cupom e comanda de teste com os ajustes atuais
+    _ITENS_TESTE=[{"nome":"Pizza Calabresa","tamanho":"G","qtd":1,"preco_cents":4500,
+                   "adicionais":[{"nome":"Borda catupiry","preco_cents":800}],"notes":"sem cebola"},
+                  {"nome":"Coca-Cola Lata","qtd":2,"preco_cents":600}]
+
+    def _enviar_teste(_imp, _ct, _jt, _pt, _rotulo):
+        """Formata o exemplo com os ajustes desta aba e da impressora e manda imprimir (thread)."""
+        def _do_t():
+            try:
+                with _usar_codepage(_cp_da_impressora(_imp)), _usar_fonte(_fonte_da_impressora(_imp)):
+                    _tx=_fmt(_ct,_jt,_pt,_imp)
+                    _r=_imprimir_com_roteamento(_imp,_tx)
+                _nm=_imp.get("nome_impressora") or _imp.get("endereco_ip","")
+                if _r.get("ok"):
+                    w.after(0,lambda:messagebox.showinfo("OK",f"{_rotulo} enviado:\n{_nm}",parent=w))
+                else:
+                    w.after(0,lambda:messagebox.showerror("Erro",_r.get("erro",""),parent=w))
+            except Exception as _e:
+                log.error(f"[CONFIG] {_rotulo} falhou: {_e}", exc_info=True)
+                _msg=str(_e)   # o nome do except some no fim do bloco; o after roda depois
+                w.after(0,lambda:messagebox.showerror("Erro",_msg,parent=w))
+        threading.Thread(target=_do_t,daemon=True).start()
+
+    def _primeira_impressora():
+        return next((i for i in cfg.get("impressoras",[]) if i.get("nome_impressora") or i.get("endereco_ip")),None)
+
     def imprimir_cupom_teste():
         """Imprime um pedido de EXEMPLO com os ajustes acima, na impressora do caixa
         (ou na 1a impressora mapeada). E o jeito de ver o resultado sem esperar pedido real."""
-        _impt=_res_imp_por_rede("receipt") \
-             or next((i for i in cfg.get("impressoras",[]) if i.get("nome_impressora") or i.get("endereco_ip")),None)
+        _impt=_res_imp_por_rede("receipt") or _primeira_impressora()
         if not _impt:
             messagebox.showwarning("Aviso","Nenhuma impressora mapeada!\nMapeie na aba Impressoras.",parent=w); return
         _ct={"type":"order","numero":"123","order_type":"delivery","customer_name":"Maria Souza",
              "company_name":(cfg.get("restaurant_name","") or "CUPOM DE TESTE").upper(),
              "created_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
-             "itens":[{"nome":"Pizza Calabresa","tamanho":"G","qtd":1,"preco_cents":4500,
-                       "adicionais":[{"nome":"Borda catupiry","preco_cents":800}],"notes":"sem cebola"},
-                      {"nome":"Coca-Cola Lata","qtd":2,"preco_cents":600}],
+             "itens":[dict(i) for i in _ITENS_TESTE],
              "subtotal_cents":5700,"delivery_fee_cents":700,"total_cents":6400,
-             "payment_method":"pix","footer_message":"Obrigado pela preferencia!"}
-        def _do_t():
-            try:
-                with _usar_codepage(_cp_da_impressora(_impt)), _usar_fonte(_fonte_da_impressora(_impt)):
-                    _tx=_fmt(_ct,"order","receipt",_impt)
-                    _r=_imprimir_com_roteamento(_impt,_tx)
-                _nm=_impt.get("nome_impressora") or _impt.get("endereco_ip","")
-                if _r.get("ok"):
-                    w.after(0,lambda:messagebox.showinfo("OK",f"Cupom de teste enviado:\n{_nm}",parent=w))
-                else:
-                    w.after(0,lambda:messagebox.showerror("Erro",_r.get("erro",""),parent=w))
-            except Exception as _e:
-                log.error(f"[CONFIG] Cupom de teste falhou: {_e}", exc_info=True)
-                w.after(0,lambda:messagebox.showerror("Erro",str(_e),parent=w))
-        threading.Thread(target=_do_t,daemon=True).start()
+             "payment_method":"pix","notes":"Interfone quebrado, ligar ao chegar",
+             "delivery_address":"Rua das Flores, 123 - Centro","footer_message":"Obrigado pela preferencia!"}
+        _enviar_teste(_impt,_ct,"order","receipt","Cupom de teste")
 
-    _fr_bt=tk.Frame(imroot,bg="#1e1e2e"); _fr_bt.grid(row=3,column=0,columnspan=2,sticky="w",padx=8,pady=(2,8))
+    def imprimir_comanda_teste():
+        """Comanda de EXEMPLO na impressora da cozinha (ou do caixa / 1a mapeada)."""
+        _impk=_res_imp_por_rede("kitchen") or _res_imp_por_rede("receipt") or _primeira_impressora()
+        if not _impk:
+            messagebox.showwarning("Aviso","Nenhuma impressora mapeada!\nMapeie na aba Impressoras.",parent=w); return
+        _ck={"type":"kitchen","numero":"123","order_type":"delivery","customer_name":"Maria Souza",
+             "created_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+             "itens":[dict(i) for i in _ITENS_TESTE],"notes":"Interfone quebrado, ligar ao chegar"}
+        _enviar_teste(_impk,_ck,"kitchen","kitchen","Comanda de teste")
+
+    _fr_bt=tk.Frame(imroot,bg="#1e1e2e"); _fr_bt.grid(row=5,column=0,columnspan=2,sticky="w",padx=8,pady=(2,8))
     tk.Button(_fr_bt,text="Imprimir cupom de teste",command=imprimir_cupom_teste,bg="#cba6f7",fg="#1e1e2e",
               font=("Segoe UI",9,"bold"),relief="flat",padx=14,pady=6,cursor="hand2").pack(side="left",padx=4)
-    tk.Label(_fr_bt,text="Sai na impressora do caixa, com os ajustes desta aba e da impressora.",
+    tk.Button(_fr_bt,text="Imprimir comanda de teste",command=imprimir_comanda_teste,bg="#cba6f7",fg="#1e1e2e",
+              font=("Segoe UI",9,"bold"),relief="flat",padx=14,pady=6,cursor="hand2").pack(side="left",padx=4)
+    tk.Label(_fr_bt,text="Cupom: impressora do caixa. Comanda: da cozinha. Com os ajustes desta aba.",
              bg="#1e1e2e",fg="#6c7086",font=("Segoe UI",8)).pack(side="left",padx=6)
 
     # BALANCAS

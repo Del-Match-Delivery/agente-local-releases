@@ -146,20 +146,23 @@ def _bt(txt):
 _bt("Grande").invoke();  assert A.cfg.get("font_size") == 2
 _bt("Normal").invoke()   # ha 2 botoes 'Normal' (tamanho e espaco); o 1o criado e o do tamanho
 assert A.cfg.get("font_size") in (0, 2)   # ver asserts dedicados de espaco abaixo
-# secoes: combos com 'Herda' aparecem na ordem loja, itens, total, rodape (pedido tem 'Auto')
+# secoes: combos com 'Herda' aparecem na ordem loja, total, rodape (pedido tem 'Auto').
+# v5.87: 'Nome dos itens' saiu daqui e virou 'Nome do produto' em Itens do cupom.
 combos_sec = [x for x in combos if "Herda" in x.cget("values")]
-assert len(combos_sec) == 4, len(combos_sec)
-cb_total = combos_sec[2]
+assert len(combos_sec) == 3, len(combos_sec)
+cb_total = combos_sec[1]
 cb_total.set("Grande"); cb_total.event_generate("<<ComboboxSelected>>"); w.update()
 assert (A.cfg.get("fonte_secoes") or {}).get("total") == 2, A.cfg.get("fonte_secoes")
 cb_total.set("Herda"); cb_total.event_generate("<<ComboboxSelected>>"); w.update()
 assert "total" not in (A.cfg.get("fonte_secoes") or {}), A.cfg.get("fonte_secoes")
 # estilo: checkbuttons e espaco
 chks = {x.cget("text"): x for x in ws if x.winfo_class() == "Checkbutton"}
-ck_neg = next(v for k, v in chks.items() if "Negrito no cupom" in k)
 ck_esc = next(v for k, v in chks.items() if "mais escura" in k)
-ck_neg.invoke(); assert A.cfg.get("negrito_cupom") is True
-ck_neg.invoke(); assert "negrito_cupom" not in A.cfg
+# v5.87: negrito virou escolha de tres (Nenhum / So observacoes / Cupom inteiro)
+assert not any("Negrito no cupom" in k for k in chks), "checkbox antigo de negrito ainda na tela"
+_bt("Cupom inteiro").invoke();  assert A.cfg.get("negrito_cupom") is True and "negrito_obs" not in A.cfg
+_bt("So observacoes").invoke(); assert A.cfg.get("negrito_obs") is True and "negrito_cupom" not in A.cfg
+_bt("Nenhum").invoke();         assert "negrito_obs" not in A.cfg and "negrito_cupom" not in A.cfg
 ck_esc.invoke(); assert A.cfg.get("mais_escuro") is True
 ck_esc.invoke(); assert "mais_escuro" not in A.cfg
 _bt("Compacto").invoke(); assert A.cfg.get("espaco_linhas") == 0
@@ -182,6 +185,42 @@ assert "avanco_linhas" not in A.cfg, A.cfg.get("avanco_linhas")
 # e tudo isso foi SALVO no disco a cada clique (salvar_config chamado)
 assert gravados, "salvar_config nunca foi chamado pelos controles"
 print("10) todos os controles da aba Impressao gravam e limpam a config certa OK")
+
+# 11) v5.87: Itens do cupom, Cupom de delivery, Comanda e a comanda de teste.
+def _bts(txt):
+    return [b for b in todos_botoes if b.cget("text") == txt]
+_bt("Coluna a direita").invoke(); assert A.cfg.get("valores_mercado") is True
+_bt("Ao lado do nome").invoke();  assert "valores_mercado" not in A.cfg
+# 'Nome do produto' (o 2o grupo com Media/Grande; o 1o e o tamanho do cupom inteiro).
+# Escolher aqui substitui o 'Nome dos itens' antigo de fonte_secoes.
+A.cfg["fonte_secoes"] = {"itens": 2, "total": 1}
+_bts("Grande")[1].invoke()
+assert A.cfg.get("fonte_nome_produto") == 2, A.cfg.get("fonte_nome_produto")
+assert A.cfg.get("fonte_secoes") == {"total": 1}, A.cfg.get("fonte_secoes")
+_bts("Media")[1].invoke();  assert A.cfg.get("fonte_nome_produto") == 1
+_bts("Normal")[-1].invoke(); assert "fonte_nome_produto" not in A.cfg   # ordem: tamanho, espaco, nome
+A.cfg.pop("fonte_secoes", None)
+_bt("Economico").invoke();     assert A.cfg.get("formato_delivery") == "economico"
+_bts("Compacto")[-1].invoke(); assert A.cfg.get("formato_delivery") == "compacto"   # o 1o e o espaco
+_bt("Completo").invoke();      assert "formato_delivery" not in A.cfg
+chks = {x.cget("text"): x for x in ws if x.winfo_class() == "Checkbutton"}
+ck_loja = next(v for k, v in chks.items() if "Nome da loja no topo da comanda" in k)
+ck_loja.invoke(); assert A.cfg.get("loja_na_comanda") is True
+n_imp = len(impressos)
+_bt("Imprimir comanda de teste").invoke()
+for _ in range(50):
+    if len(impressos) > n_imp: break
+    _t.sleep(0.1)
+assert len(impressos) > n_imp, "comanda de teste nao foi enviada"
+_imp_k, _dados_k = impressos[-1]
+assert _imp_k.get("nome_impressora") == "EPSON TM-T20", _imp_k   # impressora da COZINHA
+_txt_k = _dados_k if isinstance(_dados_k, str) else _dados_k.decode("cp850", "replace")
+assert "COZINHA" in _txt_k and "LOJA TESTE" in _txt_k and "PEDIDO #123" in _txt_k, _txt_k[:300]
+assert _txt_k.index("LOJA TESTE") < _txt_k.index("PEDIDO #123"), "nome da loja tem que vir antes do pedido"
+ck_loja.invoke(); assert "loja_na_comanda" not in A.cfg
+# a aba rola (Canvas + Scrollbar) e cabe na janela de 700 px
+assert any(x.winfo_class() == "Canvas" for x in ws), "aba Impressao sem area de rolagem"
+print("11) Itens do cupom, Cupom de delivery, Comanda e comanda de teste OK")
 
 w.destroy(); A._root.destroy()
 print("\nUI CONFIG: TUDO OK")
