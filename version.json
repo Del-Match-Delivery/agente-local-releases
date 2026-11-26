@@ -1,8 +1,8 @@
 {
   "version": "5.77",
-  "url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.85/AgenteLocal.exe",
-  "latest_version": "5.85",
-  "latest_url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.85/AgenteLocal.exe",
-  "notes": "v5.85: CONFERENCIA DE SALAO COM TAXA DE SERVICO E ROBUSTEZ. Suporte completo a discriminacao de taxa de servico ('Taxa servico: R$ X.XX') no layout de conferencia de mesa/comanda (pre_closing_full / pre_closing_simple). Enquadramento dos tipos de conferencia em TIPOS_CUPOM_CLIENTE (regras de vias de cupom de cliente). Desembrulho automatico de estruturas de mesa/comanda ('tab') e calculo dinamico de subtotal e total com fallback seguro. Mantem todas as melhorias da v5.84 (SKU de produtos) e v5.83 (manifesto em dominio proprio).",
+  "url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.86/AgenteLocal.exe",
+  "latest_version": "5.86",
+  "latest_url": "https://github.com/Del-Match-Delivery/agente-local-releases/releases/download/v5.86/AgenteLocal.exe",
+  "notes": "v5.86: CPF NA NOTA NO CUPOM. Quando o cliente informa CPF/CNPJ para a nota fiscal (PDV, cardapio, pagamento online ou iFood), o cupom do caixa, de retirada e de entrega sai com a linha 'CPF na nota: 000.000.000-00' logo abaixo do cliente/telefone (campo customer_cpf do servidor, com mascara; sem documento o cupom e identico ao da v5.85). Mantem todas as melhorias da v5.85 (conferencia de salao com taxa de servico), v5.84 (SKU) e v5.83 (manifesto em dominio proprio).",
   "_REGRA_DE_PUBLICACAO": "'version' fica CONGELADO em 5.77 para sempre: agentes <=5.77 tem o auto-update QUEBRADO (o bat morre no proprio taskkill) e comparam SO 'version' - se mudar, cada um deles se mata uma vez (loja sem agente) e trava na versao antiga. 'url' PODE (e deve) apontar para o exe mais novo: esses agentes nunca baixam (version igual a deles), mas o InstalarAgente.exe e os bats antigos leem 'url' e assim instalam a versao atual. A cada versao nova atualize latest_version + latest_url + url, NUNCA version. Clientes em <=5.77 migram uma unica vez pelo ATUALIZAR_E_ABRIR_AGENTE.bat. Downgrade automatico so com \"allow_downgrade\": true."
 }
